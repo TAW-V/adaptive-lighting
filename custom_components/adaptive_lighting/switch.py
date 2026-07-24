@@ -118,6 +118,7 @@ from .const import (
     CONF_SKIP_REDUNDANT_COMMANDS,
     CONF_SLEEP_BRIGHTNESS,
     CONF_SLEEP_COLOR_TEMP,
+    CONF_SLEEP_MODE_SCENE,
     CONF_SLEEP_RGB_COLOR,
     CONF_SLEEP_RGB_OR_COLOR_TEMP,
     CONF_SLEEP_TRANSITION,
@@ -921,6 +922,9 @@ class AdaptiveSwitch(SwitchEntity, RestoreEntity):
 
         self.initial_transition = data[CONF_INITIAL_TRANSITION]
         self._sleep_transition = data[CONF_SLEEP_TRANSITION]
+        # Optional scene/script to activate on sleep mode instead of adapting lights.
+        # `validate` turns the "None" sentinel into an actual `None`.
+        self._sleep_mode_scene: str | None = data[CONF_SLEEP_MODE_SCENE]
         self._only_once = data[CONF_ONLY_ONCE]
         self._prefer_rgb_color = data[CONF_PREFER_RGB_COLOR]
         self._separate_turn_on_commands = data[CONF_SEPARATE_TURN_ON_COMMANDS]
@@ -1411,6 +1415,23 @@ class AdaptiveSwitch(SwitchEntity, RestoreEntity):
                 data,
             )
 
+    def _adaptation_paused_for_sleep_scene(self) -> bool:
+        """Whether adaptation is handed over to a configured sleep-mode scene/script.
+
+        When sleep mode is on and a `sleep_mode_scene` is configured, that
+        scene/script is responsible for the light state, so we don't adapt the
+        lights ourselves.
+        """
+        if self.sleep_mode_switch.is_on and self._sleep_mode_scene is not None:
+            _LOGGER.debug(
+                "%s: Not adapting lights because sleep mode is on and"
+                " 'sleep_mode_scene' ('%s') is configured",
+                self._name,
+                self._sleep_mode_scene,
+            )
+            return True
+        return False
+
     async def _update_attrs_and_maybe_adapt_lights(
         self,
         *,
@@ -1438,7 +1459,9 @@ class AdaptiveSwitch(SwitchEntity, RestoreEntity):
         )
         self.async_write_ha_state()
 
-        if not force and self._only_once:
+        # Skip adapting the lights when a sleep-mode scene/script handles them, or
+        # when `only_once` is set and this isn't a forced adaptation.
+        if self._adaptation_paused_for_sleep_scene() or (not force and self._only_once):
             return
 
         if lights is None:
@@ -1592,10 +1615,41 @@ class AdaptiveSwitch(SwitchEntity, RestoreEntity):
         )
         # Reset the manually controlled status when the "sleep mode" changes
         self.manager.reset(*self.lights)
+        context = self.create_context("sleep", parent=event.context)
+        # When sleep mode turns on and a scene/script is configured, activate it
+        # instead of adapting the lights. `_update_attrs_and_maybe_adapt_lights`
+        # will update the attributes but skip adapting the lights while sleep mode
+        # is on (see the guard there), letting the scene/script control them.
+        if self._sleep_mode_scene is not None and self.sleep_mode_switch.is_on:
+            await self._activate_sleep_mode_scene(context)
         await self._update_attrs_and_maybe_adapt_lights(
-            context=self.create_context("sleep", parent=event.context),
+            context=context,
             transition=self._sleep_transition,
             force=True,
+        )
+
+    async def _activate_sleep_mode_scene(self, context: Context) -> None:
+        """Activate the configured sleep-mode scene or run the script.
+
+        The Adaptive Lighting context is propagated to the resulting
+        `light.turn_on` calls so that Adaptive Lighting does not intercept or
+        re-adapt them, letting the scene/script set the lights as-is.
+        """
+        assert self._sleep_mode_scene is not None
+        entity_id = self._sleep_mode_scene
+        domain = entity_id.split(".", 1)[0]
+        _LOGGER.debug(
+            "%s: Sleep mode on, activating %s '%s' instead of adapting lights",
+            self._name,
+            domain,
+            entity_id,
+        )
+        await self.hass.services.async_call(
+            domain,
+            SERVICE_TURN_ON,
+            {ATTR_ENTITY_ID: entity_id},
+            context=context,
+            blocking=False,
         )
 
     def fire_manual_control_event(

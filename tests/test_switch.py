@@ -42,6 +42,7 @@ from homeassistant.components.adaptive_lighting.const import (
     CONF_MULTI_LIGHT_INTERCEPT,
     CONF_PREFER_RGB_COLOR,
     CONF_SEPARATE_TURN_ON_COMMANDS,
+    CONF_SLEEP_MODE_SCENE,
     CONF_SLEEP_RGB_OR_COLOR_TEMP,
     CONF_SUNRISE_OFFSET,
     CONF_SUNRISE_TIME,
@@ -120,7 +121,7 @@ from homeassistant.helpers.entity_platform import async_get_platforms
 from homeassistant.setup import async_setup_component
 from homeassistant.util.color import color_temperature_mired_to_kelvin
 
-from tests.common import MockConfigEntry
+from tests.common import MockConfigEntry, async_mock_service
 
 # HA 2026.6 removed the legacy `light: platform: template` YAML format
 # (home-assistant/core#169615); use the modern `template:` format there.
@@ -635,6 +636,71 @@ async def test_light_settings(hass):
     for state in light_states:
         assert state.attributes[ATTR_BRIGHTNESS] == 255
         assert_expected_color_temp(state)
+
+
+async def test_sleep_mode_scene(hass):
+    """A configured scene/script is activated on sleep mode instead of adapting."""
+    # Capture calls to the service that the configured `sleep_mode_scene` entity uses.
+    script_calls = async_mock_service(hass, "script", SERVICE_TURN_ON)
+
+    switch, _ = await setup_lights_and_switch(
+        hass,
+        {CONF_SLEEP_MODE_SCENE: "script.bedtime"},
+    )
+    lights = switch.lights
+
+    # Record the (adapted, non-sleep) brightness before entering sleep mode.
+    brightness_before = {
+        light: hass.states.get(light).attributes[ATTR_BRIGHTNESS] for light in lights
+    }
+
+    # Turn on "sleep mode"
+    await hass.services.async_call(
+        SWITCH_DOMAIN,
+        SERVICE_TURN_ON,
+        {ATTR_ENTITY_ID: switch.sleep_mode_switch.entity_id},
+        blocking=True,
+    )
+    await hass.async_block_till_done()
+
+    # The configured script was started exactly once, targeting the right entity,
+    # using an Adaptive Lighting context (so AL ignores the lights it turns on).
+    assert len(script_calls) == 1
+    assert script_calls[0].data[ATTR_ENTITY_ID] == "script.bedtime"
+    assert is_our_context(script_calls[0].context)
+
+    # The lights must NOT have been adapted to the (dim) sleep settings.
+    for light in lights:
+        assert (
+            hass.states.get(light).attributes[ATTR_BRIGHTNESS]
+            == brightness_before[light]
+        )
+
+    # A regular adaptation update while sleeping must also skip the lights and
+    # must not re-run the script.
+    await switch._update_attrs_and_maybe_adapt_lights(
+        context=switch.create_context("test"),
+        transition=0,
+        force=True,
+    )
+    await hass.async_block_till_done()
+    assert len(script_calls) == 1
+    for light in lights:
+        assert (
+            hass.states.get(light).attributes[ATTR_BRIGHTNESS]
+            == brightness_before[light]
+        )
+
+    # Turning "sleep mode" off resumes normal adaptation (and does not run the
+    # script again — it only triggers when sleep mode turns on).
+    await hass.services.async_call(
+        SWITCH_DOMAIN,
+        SERVICE_TURN_OFF,
+        {ATTR_ENTITY_ID: switch.sleep_mode_switch.entity_id},
+        blocking=True,
+    )
+    await hass.async_block_till_done()
+    assert len(script_calls) == 1
 
 
 async def test_manager_not_tracking_untracked_lights(hass):

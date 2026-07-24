@@ -11,6 +11,7 @@ from homeassistant.helpers.selector import EntitySelector, EntitySelectorConfig
 
 from .const import (  # pylint: disable=unused-import
     CONF_LIGHTS,
+    CONF_SLEEP_MODE_SCENE,
     DOMAIN,
     EXTRA_VALIDATION,
     NONE_STR,
@@ -161,12 +162,23 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
                     multiple=True,
                 ),
             ),
+            CONF_SLEEP_MODE_SCENE: EntitySelector(
+                EntitySelectorConfig(
+                    domain=["scene", "script"],
+                ),
+            ),
         }
 
         options_schema = {}
         for name, default, validation in VALIDATION_TUPLES:
-            key = vol.Optional(name, default=conf.options.get(name, default))
+            current = conf.options.get(name, default)
             value = to_replace.get(name, validation)
+            if name == CONF_SLEEP_MODE_SCENE and current in (NONE_STR, None, ""):
+                # Omit the default so the entity picker renders empty and
+                # clearable instead of showing the "None" sentinel as an entity.
+                key = vol.Optional(name)
+            else:
+                key = vol.Optional(name, default=current)
             options_schema[key] = value
 
         return self.async_show_form(

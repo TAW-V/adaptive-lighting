@@ -137,6 +137,14 @@ DOCS[CONF_SLEEP_RGB_OR_COLOR_TEMP] = (
     'Use either `"rgb_color"` or `"color_temp"` in sleep mode. 🌙'
 )
 
+CONF_SLEEP_MODE_SCENE = "sleep_mode_scene"
+DOCS[CONF_SLEEP_MODE_SCENE] = (
+    "Optional `scene` or `script` entity to activate when sleep mode turns on, "
+    "instead of adapting the lights to the sleep brightness/color. While sleep "
+    "mode is on and this is set, Adaptive Lighting stops adapting the lights and "
+    "lets the scene/script control them. Leave empty to keep the default behavior. 🎬😴"
+)
+
 CONF_SUNRISE_OFFSET, DEFAULT_SUNRISE_OFFSET = "sunrise_offset", 0
 DOCS[CONF_SUNRISE_OFFSET] = (
     "Adjust sunrise time with a positive or negative offset in seconds. ⏰"
@@ -349,6 +357,7 @@ VALIDATION_TUPLES: list[tuple[str, Any, Any]] = [
         selector.ColorRGBSelector(selector.ColorRGBSelectorConfig()),  # type: ignore[arg-type]
     ),
     (CONF_SLEEP_TRANSITION, DEFAULT_SLEEP_TRANSITION, VALID_TRANSITION),
+    (CONF_SLEEP_MODE_SCENE, NONE_STR, str),
     (CONF_ADAPT_UNTIL_SLEEP, DEFAULT_ADAPT_UNTIL_SLEEP, bool),
     (CONF_SUNRISE_TIME, NONE_STR, str),
     (CONF_MIN_SUNRISE_TIME, NONE_STR, str),
