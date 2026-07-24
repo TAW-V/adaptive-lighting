@@ -64,7 +64,9 @@ DOCS[CONF_INITIAL_TRANSITION] = (
 
 CONF_SLEEP_TRANSITION, DEFAULT_SLEEP_TRANSITION = "sleep_transition", 1
 DOCS[CONF_SLEEP_TRANSITION] = (
-    'Duration of transition when "sleep mode" is toggled in seconds. 😴'
+    'Duration of transition when "sleep mode" is toggled in seconds. '
+    "When `sleep_mode_scene` is set, this is instead used as the delay (in "
+    "seconds) before the scene/script is activated. 😴"
 )
 
 CONF_INTERVAL, DEFAULT_INTERVAL = "interval", 90
@@ -142,7 +144,9 @@ DOCS[CONF_SLEEP_MODE_SCENE] = (
     "Optional `scene` or `script` entity to activate when sleep mode turns on, "
     "instead of adapting the lights to the sleep brightness/color. While sleep "
     "mode is on and this is set, Adaptive Lighting stops adapting the lights and "
-    "lets the scene/script control them. Leave empty to keep the default behavior. 🎬😴"
+    "lets the scene/script control them. Activation is delayed by `sleep_transition` "
+    "seconds (and cancelled if sleep mode turns off again during that delay). "
+    "Leave empty to keep the default behavior. 🎬😴"
 )
 
 CONF_SUNRISE_OFFSET, DEFAULT_SUNRISE_OFFSET = "sunrise_offset", 0

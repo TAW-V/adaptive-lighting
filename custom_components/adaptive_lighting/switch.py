@@ -879,6 +879,9 @@ class AdaptiveSwitch(SwitchEntity, RestoreEntity):
         # Set in self._update_attrs_and_maybe_adapt_lights
         self._settings: dict[str, Any] = {}
 
+        # Pending delayed `sleep_mode_scene` activation (see the sleep handler).
+        self._sleep_mode_scene_task: asyncio.Task[None] | None = None
+
         # Set and unset tracker in async_turn_on and async_turn_off
         self.remove_listeners: list[CALLBACK_TYPE] = []
         self.remove_interval: CALLBACK_TYPE = lambda: None
@@ -1119,6 +1122,7 @@ class AdaptiveSwitch(SwitchEntity, RestoreEntity):
 
     def _remove_listeners(self) -> None:
         self._remove_interval_listener()
+        self._cancel_sleep_mode_scene_task()
 
         while self.remove_listeners:
             remove_listener = self.remove_listeners.pop()
@@ -1616,17 +1620,44 @@ class AdaptiveSwitch(SwitchEntity, RestoreEntity):
         # Reset the manually controlled status when the "sleep mode" changes
         self.manager.reset(*self.lights)
         context = self.create_context("sleep", parent=event.context)
+        # Cancel any pending scene activation from a previous sleep-mode toggle.
+        self._cancel_sleep_mode_scene_task()
         # When sleep mode turns on and a scene/script is configured, activate it
-        # instead of adapting the lights. `_update_attrs_and_maybe_adapt_lights`
-        # will update the attributes but skip adapting the lights while sleep mode
-        # is on (see the guard there), letting the scene/script control them.
+        # instead of adapting the lights. Activation is scheduled after
+        # `sleep_transition` seconds (used here as a delay). Meanwhile,
+        # `_update_attrs_and_maybe_adapt_lights` updates the attributes but skips
+        # adapting the lights while sleep mode is on (see the guard there),
+        # letting the scene/script control them.
         if self._sleep_mode_scene is not None and self.sleep_mode_switch.is_on:
-            await self._activate_sleep_mode_scene(context)
+            self._schedule_sleep_mode_scene(context)
         await self._update_attrs_and_maybe_adapt_lights(
             context=context,
             transition=self._sleep_transition,
             force=True,
         )
+
+    def _cancel_sleep_mode_scene_task(self) -> None:
+        """Cancel a pending delayed `sleep_mode_scene` activation, if any."""
+        task = self._sleep_mode_scene_task
+        if task is not None and not task.done():
+            task.cancel()
+        self._sleep_mode_scene_task = None
+
+    def _schedule_sleep_mode_scene(self, context: Context) -> None:
+        """Schedule the sleep-mode scene/script, delayed by `sleep_transition`."""
+
+        async def _delayed_activate() -> None:
+            try:
+                if self._sleep_transition:
+                    await asyncio.sleep(self._sleep_transition)
+                # Sleep mode (or the switch) may have been turned off during the
+                # delay; don't activate the scene in that case.
+                if self.sleep_mode_switch.is_on and self.is_on:
+                    await self._activate_sleep_mode_scene(context)
+            except asyncio.CancelledError:
+                pass  # Cancelled because sleep mode was toggled again.
+
+        self._sleep_mode_scene_task = self.hass.async_create_task(_delayed_activate())
 
     async def _activate_sleep_mode_scene(self, context: Context) -> None:
         """Activate the configured sleep-mode scene or run the script.

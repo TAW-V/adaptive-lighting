@@ -44,6 +44,7 @@ from homeassistant.components.adaptive_lighting.const import (
     CONF_SEPARATE_TURN_ON_COMMANDS,
     CONF_SLEEP_MODE_SCENE,
     CONF_SLEEP_RGB_OR_COLOR_TEMP,
+    CONF_SLEEP_TRANSITION,
     CONF_SUNRISE_OFFSET,
     CONF_SUNRISE_TIME,
     CONF_SUNSET_TIME,
@@ -645,7 +646,8 @@ async def test_sleep_mode_scene(hass):
 
     switch, _ = await setup_lights_and_switch(
         hass,
-        {CONF_SLEEP_MODE_SCENE: "script.bedtime"},
+        # `sleep_transition` is the activation delay; use 0 for instant activation.
+        {CONF_SLEEP_MODE_SCENE: "script.bedtime", CONF_SLEEP_TRANSITION: 0},
     )
     lights = switch.lights
 
@@ -701,6 +703,66 @@ async def test_sleep_mode_scene(hass):
     )
     await hass.async_block_till_done()
     assert len(script_calls) == 1
+
+
+async def test_sleep_mode_scene_delay(hass):
+    """`sleep_transition` delays scene activation, and sleep-off cancels it."""
+    delay = 30
+    script_calls = async_mock_service(hass, "script", SERVICE_TURN_ON)
+
+    # A controllable stand-in for `asyncio.sleep` so we can pause "inside" the
+    # activation delay and inspect the state before the scene fires. Other (short)
+    # sleeps fall through to the real implementation.
+    real_sleep = asyncio.sleep
+    inside_delay = asyncio.Event()
+    release = asyncio.Event()
+    recorded_delays: list[float] = []
+
+    async def fake_sleep(seconds, *args, **kwargs):
+        recorded_delays.append(seconds)
+        if seconds == delay:
+            inside_delay.set()
+            await release.wait()
+        else:
+            await real_sleep(seconds, *args, **kwargs)
+
+    switch, _ = await setup_lights_and_switch(
+        hass,
+        {CONF_SLEEP_MODE_SCENE: "script.bedtime", CONF_SLEEP_TRANSITION: delay},
+    )
+
+    with patch(
+        "homeassistant.components.adaptive_lighting.switch.asyncio.sleep",
+        fake_sleep,
+    ):
+        # Turn sleep mode on -> schedules a delayed activation that now parks
+        # inside `fake_sleep`.
+        await hass.services.async_call(
+            SWITCH_DOMAIN,
+            SERVICE_TURN_ON,
+            {ATTR_ENTITY_ID: switch.sleep_mode_switch.entity_id},
+            blocking=False,
+        )
+        await asyncio.wait_for(inside_delay.wait(), timeout=1)
+
+        # The delay uses `sleep_transition`, and the scene has NOT fired yet.
+        assert delay in recorded_delays
+        assert len(script_calls) == 0
+
+        # Turning sleep mode off during the delay cancels the pending activation.
+        await hass.services.async_call(
+            SWITCH_DOMAIN,
+            SERVICE_TURN_OFF,
+            {ATTR_ENTITY_ID: switch.sleep_mode_switch.entity_id},
+            blocking=True,
+        )
+        await hass.async_block_till_done()
+        release.set()  # unblock the (now cancelled) delay, if still parked
+        await hass.async_block_till_done()
+
+        # The scene must never have been activated.
+        assert len(script_calls) == 0
+        assert switch._sleep_mode_scene_task is None
 
 
 async def test_manager_not_tracking_untracked_lights(hass):
