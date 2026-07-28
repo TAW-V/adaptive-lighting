@@ -43,6 +43,7 @@ from homeassistant.components.adaptive_lighting.const import (
     CONF_PREFER_RGB_COLOR,
     CONF_SEPARATE_TURN_ON_COMMANDS,
     CONF_SLEEP_MODE_SCENE,
+    CONF_SLEEP_MODE_SCENE_TRANSITION,
     CONF_SLEEP_RGB_OR_COLOR_TEMP,
     CONF_SLEEP_TRANSITION,
     CONF_SUNRISE_OFFSET,
@@ -865,6 +866,54 @@ async def test_transition_until_sleep_after_ramp(hass):
     await update_at(after_ramp)
     assert len(script_calls) >= 1
     assert is_our_context(script_calls[-1].context)
+
+
+async def test_sleep_mode_scene_transition_for_scene(hass):
+    """`sleep_mode_scene_transition` is passed to `scene.turn_on`."""
+    scene_calls = async_mock_service(hass, "scene", SERVICE_TURN_ON)
+    switch, _ = await setup_lights_and_switch(
+        hass,
+        {
+            CONF_SLEEP_MODE_SCENE: "scene.bedtime",
+            CONF_SLEEP_MODE_SCENE_TRANSITION: 7,
+            CONF_SLEEP_TRANSITION: 0,  # activate the scene instantly on toggle
+        },
+    )
+    await hass.services.async_call(
+        SWITCH_DOMAIN,
+        SERVICE_TURN_ON,
+        {ATTR_ENTITY_ID: switch.sleep_mode_switch.entity_id},
+        blocking=True,
+    )
+    await hass.async_block_till_done()
+
+    assert len(scene_calls) == 1
+    assert scene_calls[0].data[ATTR_ENTITY_ID] == "scene.bedtime"
+    assert scene_calls[0].data[ATTR_TRANSITION] == 7
+
+
+async def test_sleep_mode_scene_transition_ignored_for_script(hass):
+    """The transition is not passed to `script.turn_on` (scripts don't accept it)."""
+    script_calls = async_mock_service(hass, "script", SERVICE_TURN_ON)
+    switch, _ = await setup_lights_and_switch(
+        hass,
+        {
+            CONF_SLEEP_MODE_SCENE: "script.bedtime",
+            CONF_SLEEP_MODE_SCENE_TRANSITION: 7,
+            CONF_SLEEP_TRANSITION: 0,
+        },
+    )
+    await hass.services.async_call(
+        SWITCH_DOMAIN,
+        SERVICE_TURN_ON,
+        {ATTR_ENTITY_ID: switch.sleep_mode_switch.entity_id},
+        blocking=True,
+    )
+    await hass.async_block_till_done()
+
+    assert len(script_calls) == 1
+    assert script_calls[0].data[ATTR_ENTITY_ID] == "script.bedtime"
+    assert ATTR_TRANSITION not in script_calls[0].data
 
 
 async def test_manager_not_tracking_untracked_lights(hass):

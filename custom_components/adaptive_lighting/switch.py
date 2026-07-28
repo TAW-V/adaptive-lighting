@@ -119,6 +119,7 @@ from .const import (
     CONF_SLEEP_BRIGHTNESS,
     CONF_SLEEP_COLOR_TEMP,
     CONF_SLEEP_MODE_SCENE,
+    CONF_SLEEP_MODE_SCENE_TRANSITION,
     CONF_SLEEP_RGB_COLOR,
     CONF_SLEEP_RGB_OR_COLOR_TEMP,
     CONF_SLEEP_TRANSITION,
@@ -932,6 +933,7 @@ class AdaptiveSwitch(SwitchEntity, RestoreEntity):
         # Optional scene/script to activate on sleep mode instead of adapting lights.
         # `validate` turns the "None" sentinel into an actual `None`.
         self._sleep_mode_scene: str | None = data[CONF_SLEEP_MODE_SCENE]
+        self._sleep_mode_scene_transition = data[CONF_SLEEP_MODE_SCENE_TRANSITION]
         self._only_once = data[CONF_ONLY_ONCE]
         self._prefer_rgb_color = data[CONF_PREFER_RGB_COLOR]
         self._separate_turn_on_commands = data[CONF_SEPARATE_TURN_ON_COMMANDS]
@@ -1731,16 +1733,22 @@ class AdaptiveSwitch(SwitchEntity, RestoreEntity):
         assert self._sleep_mode_scene is not None
         entity_id = self._sleep_mode_scene
         domain = entity_id.split(".", 1)[0]
+        service_data: dict[str, Any] = {ATTR_ENTITY_ID: entity_id}
+        # `scene.turn_on` supports a `transition`; `script.turn_on` does not, so
+        # only add it for scenes (and only when set, to preserve #378's behavior).
+        if domain == "scene" and self._sleep_mode_scene_transition:
+            service_data[ATTR_TRANSITION] = self._sleep_mode_scene_transition
         _LOGGER.debug(
-            "%s: Activating %s '%s' instead of adapting lights",
+            "%s: Activating %s '%s' instead of adapting lights (service_data=%s)",
             self._name,
             domain,
             entity_id,
+            service_data,
         )
         await self.hass.services.async_call(
             domain,
             SERVICE_TURN_ON,
-            {ATTR_ENTITY_ID: entity_id},
+            service_data,
             context=self.create_context("scene", parent=context),
             blocking=False,
         )

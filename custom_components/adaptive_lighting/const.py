@@ -152,6 +152,16 @@ DOCS[CONF_SLEEP_MODE_SCENE] = (
     "scene/script control them. Leave empty to keep the default behavior. 🎬😴"
 )
 
+CONF_SLEEP_MODE_SCENE_TRANSITION, DEFAULT_SLEEP_MODE_SCENE_TRANSITION = (
+    "sleep_mode_scene_transition",
+    0,
+)
+DOCS[CONF_SLEEP_MODE_SCENE_TRANSITION] = (
+    "Transition time in seconds used when activating `sleep_mode_scene`. Only "
+    "applies to `scene` entities (passed to `scene.turn_on`); it is ignored for "
+    "scripts, which control their own transitions. ⏲️🎬"
+)
+
 CONF_SUNRISE_OFFSET, DEFAULT_SUNRISE_OFFSET = "sunrise_offset", 0
 DOCS[CONF_SUNRISE_OFFSET] = (
     "Adjust sunrise time with a positive or negative offset in seconds. ⏰"
@@ -377,6 +387,11 @@ VALIDATION_TUPLES: list[tuple[str, Any, Any]] = [
     ),
     (CONF_SLEEP_TRANSITION, DEFAULT_SLEEP_TRANSITION, VALID_TRANSITION),
     (CONF_SLEEP_MODE_SCENE, NONE_STR, str),
+    (
+        CONF_SLEEP_MODE_SCENE_TRANSITION,
+        DEFAULT_SLEEP_MODE_SCENE_TRANSITION,
+        VALID_TRANSITION,
+    ),
     (CONF_ADAPT_UNTIL_SLEEP, DEFAULT_ADAPT_UNTIL_SLEEP, bool),
     (
         CONF_TRANSITION_UNTIL_SLEEP_AFTER_RAMP,
