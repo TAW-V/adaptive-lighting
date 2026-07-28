@@ -51,6 +51,7 @@ from homeassistant.components.adaptive_lighting.const import (
     CONF_TAKE_OVER_CONTROL,
     CONF_TAKE_OVER_CONTROL_MODE,
     CONF_TRANSITION,
+    CONF_TRANSITION_UNTIL_SLEEP_AFTER_RAMP,
     CONF_TURN_ON_LIGHTS,
     CONF_USE_DEFAULTS,
     DEFAULT_MAX_BRIGHTNESS,
@@ -763,6 +764,107 @@ async def test_sleep_mode_scene_delay(hass):
         # The scene must never have been activated.
         assert len(script_calls) == 0
         assert switch._sleep_mode_scene_task is None
+
+
+async def test_sleep_mode_scene_transition_until_sleep(hass):
+    """With `transition_until_sleep`, the scene fires after sunset, not adaptation."""
+    script_calls = async_mock_service(hass, "script", SERVICE_TURN_ON)
+    switch, _ = await setup_lights_and_switch(
+        hass,
+        {CONF_SLEEP_MODE_SCENE: "script.bedtime", CONF_ADAPT_UNTIL_SLEEP: True},
+    )
+    lights = switch.lights
+    context = switch.create_context("test")
+
+    sunset = SUNSET.replace(tzinfo=dt_util.DEFAULT_TIME_ZONE).astimezone(dt_util.UTC)
+    before_sunset = sunset - datetime.timedelta(hours=2)
+    after_sunset = sunset + datetime.timedelta(hours=1)
+
+    async def update_at(time):
+        with patch(
+            "homeassistant.components.adaptive_lighting.color_and_brightness.utcnow",
+            return_value=time,
+        ):
+            await switch._update_attrs_and_maybe_adapt_lights(
+                context=context,
+                transition=0,
+                force=True,
+            )
+            await hass.async_block_till_done()
+
+    # The manual sleep switch stays off the whole time.
+    assert not switch.sleep_mode_switch.is_on
+
+    # Before sunset: normal adaptation, no scene.
+    await update_at(before_sunset)
+    assert len(script_calls) == 0
+
+    # Entering the regime (after sunset) activates the scene/script once (with an
+    # AL context) instead of adapting the lights.
+    brightness_before = {
+        light: hass.states.get(light).attributes[ATTR_BRIGHTNESS] for light in lights
+    }
+    await update_at(after_sunset)
+    assert len(script_calls) == 1
+    assert script_calls[-1].data[ATTR_ENTITY_ID] == "script.bedtime"
+    assert is_our_context(script_calls[-1].context)
+    for light in lights:
+        assert (
+            hass.states.get(light).attributes[ATTR_BRIGHTNESS]
+            == brightness_before[light]
+        )
+
+    # A subsequent interval-style cycle in the same regime must NOT re-fire the
+    # scene (option 2: only on regime entry / light-on, not every interval).
+    await update_at(after_sunset)
+    assert len(script_calls) == 1
+
+    # Leaving the regime (before sunset) and re-entering fires it again.
+    await update_at(before_sunset)
+    await update_at(after_sunset)
+    assert len(script_calls) == 2
+
+
+async def test_transition_until_sleep_after_ramp(hass):
+    """`transition_until_sleep_after_ramp` delays the transition until the dark ramp ends."""
+    script_calls = async_mock_service(hass, "script", SERVICE_TURN_ON)
+    dark_seconds = 3600
+    switch, _ = await setup_lights_and_switch(
+        hass,
+        {
+            CONF_SLEEP_MODE_SCENE: "script.bedtime",
+            CONF_ADAPT_UNTIL_SLEEP: True,
+            CONF_TRANSITION_UNTIL_SLEEP_AFTER_RAMP: True,
+            CONF_BRIGHTNESS_MODE: "tanh",
+            CONF_BRIGHTNESS_MODE_TIME_DARK: dark_seconds,
+        },
+    )
+    context = switch.create_context("test")
+
+    sunset = SUNSET.replace(tzinfo=dt_util.DEFAULT_TIME_ZONE).astimezone(dt_util.UTC)
+    during_ramp = sunset + datetime.timedelta(seconds=dark_seconds // 2)
+    after_ramp = sunset + datetime.timedelta(seconds=dark_seconds * 2)
+
+    async def update_at(time):
+        with patch(
+            "homeassistant.components.adaptive_lighting.color_and_brightness.utcnow",
+            return_value=time,
+        ):
+            await switch._update_attrs_and_maybe_adapt_lights(
+                context=context,
+                transition=0,
+                force=True,
+            )
+            await hass.async_block_till_done()
+
+    # After sunset but still within the dark brightness ramp: no scene yet.
+    await update_at(during_ramp)
+    assert len(script_calls) == 0
+
+    # Once the dark ramp has elapsed: the scene/script is activated.
+    await update_at(after_ramp)
+    assert len(script_calls) >= 1
+    assert is_our_context(script_calls[-1].context)
 
 
 async def test_manager_not_tracking_untracked_lights(hass):

@@ -141,12 +141,15 @@ DOCS[CONF_SLEEP_RGB_OR_COLOR_TEMP] = (
 
 CONF_SLEEP_MODE_SCENE = "sleep_mode_scene"
 DOCS[CONF_SLEEP_MODE_SCENE] = (
-    "Optional `scene` or `script` entity to activate when sleep mode turns on, "
-    "instead of adapting the lights to the sleep brightness/color. While sleep "
-    "mode is on and this is set, Adaptive Lighting stops adapting the lights and "
-    "lets the scene/script control them. Activation is delayed by `sleep_transition` "
-    "seconds (and cancelled if sleep mode turns off again during that delay). "
-    "Leave empty to keep the default behavior. 🎬😴"
+    "Optional `scene` or `script` entity to activate instead of adapting the "
+    "lights to the sleep brightness/color. It is activated (1) when sleep mode "
+    "turns on (delayed by `sleep_transition` seconds, cancelled if sleep mode "
+    "turns off again during that delay), and (2) if `transition_until_sleep` is "
+    "enabled, when the after-sunset transition begins and whenever a light turns "
+    "on during it (not on every interval, so manual changes are preserved), "
+    "instead of gradually easing the lights toward the sleep values. While "
+    "active, Adaptive Lighting stops adapting the lights and lets the "
+    "scene/script control them. Leave empty to keep the default behavior. 🎬😴"
 )
 
 CONF_SUNRISE_OFFSET, DEFAULT_SUNRISE_OFFSET = "sunrise_offset", 0
@@ -235,6 +238,18 @@ CONF_ADAPT_UNTIL_SLEEP, DEFAULT_ADAPT_UNTIL_SLEEP = (
 DOCS[CONF_ADAPT_UNTIL_SLEEP] = (
     "When enabled, Adaptive Lighting will treat sleep settings as the minimum, "
     "transitioning to these values after sunset. 🌙"
+)
+
+CONF_TRANSITION_UNTIL_SLEEP_AFTER_RAMP, DEFAULT_TRANSITION_UNTIL_SLEEP_AFTER_RAMP = (
+    "transition_until_sleep_after_ramp",
+    False,
+)
+DOCS[CONF_TRANSITION_UNTIL_SLEEP_AFTER_RAMP] = (
+    "Only relevant when `transition_until_sleep` is enabled. When set, the "
+    "transition toward the sleep values (the color/temperature ramp, or the "
+    "`sleep_mode_scene` scene/script) starts after the brightness ramp finishes, "
+    "i.e. at `sunset + sunset_offset + brightness_mode_time_dark`, instead of "
+    "right at sunset. Before that point the lights stay at the minimum. 🌙⏳"
 )
 
 CONF_ADAPT_DELAY, DEFAULT_ADAPT_DELAY = "adapt_delay", 0
@@ -363,6 +378,11 @@ VALIDATION_TUPLES: list[tuple[str, Any, Any]] = [
     (CONF_SLEEP_TRANSITION, DEFAULT_SLEEP_TRANSITION, VALID_TRANSITION),
     (CONF_SLEEP_MODE_SCENE, NONE_STR, str),
     (CONF_ADAPT_UNTIL_SLEEP, DEFAULT_ADAPT_UNTIL_SLEEP, bool),
+    (
+        CONF_TRANSITION_UNTIL_SLEEP_AFTER_RAMP,
+        DEFAULT_TRANSITION_UNTIL_SLEEP_AFTER_RAMP,
+        bool,
+    ),
     (CONF_SUNRISE_TIME, NONE_STR, str),
     (CONF_MIN_SUNRISE_TIME, NONE_STR, str),
     (CONF_MAX_SUNRISE_TIME, NONE_STR, str),

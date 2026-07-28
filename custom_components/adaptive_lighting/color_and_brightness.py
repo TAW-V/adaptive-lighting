@@ -228,6 +228,7 @@ class SunLightSettings:
     sunrise_offset: datetime.timedelta = datetime.timedelta()
     sunset_offset: datetime.timedelta = datetime.timedelta()
     timezone: datetime.tzinfo = UTC
+    transition_until_sleep_after_ramp: bool = False
 
     @cached_property
     def sun(self) -> SunEvents:
@@ -323,20 +324,41 @@ class SunLightSettings:
             return self._brightness_pct_tanh(dt)
         return None
 
-    def color_temp_kelvin(self, sun_position: float) -> int:
+    def _in_sleep_transition(
+        self,
+        dt: datetime.datetime,
+        sun_position: float,
+    ) -> bool:
+        """Whether the `transition_until_sleep` "toward sleep" regime is active.
+
+        This is normally the whole night (`sun_position < 0`) when
+        `transition_until_sleep` is enabled. When `transition_until_sleep_after_ramp`
+        is set, the regime only starts once the brightness ramp has finished, i.e.
+        at `sunset + sunset_offset + brightness_mode_time_dark`.
+        """
+        if not self.adapt_until_sleep or sun_position >= 0:
+            return False
+        if not self.transition_until_sleep_after_ramp:
+            return True
+        # Delay onset until the dark brightness ramp (which starts at sunset) has
+        # elapsed. Between sunset and solar midnight the previous event is SUNSET.
+        (prev_event, prev_ts), _next = self.sun.prev_and_next_events(dt)
+        if prev_event != SunEvent.SUNSET:
+            return True
+        dark = self.brightness_mode_time_dark.total_seconds()
+        return dt.timestamp() - prev_ts >= dark
+
+    def color_temp_kelvin(self, sun_position: float, in_sleep_transition: bool) -> int:
         """Calculate the color temperature in Kelvin."""
         if sun_position > 0:
             delta = self.max_color_temp - self.min_color_temp
             ct = (delta * sun_position) + self.min_color_temp
             return 5 * round(ct / 5)  # round to nearest 5
-        if sun_position == 0 or not self.adapt_until_sleep:
+        if not in_sleep_transition:
             return self.min_color_temp
-        if self.adapt_until_sleep and sun_position < 0:
-            delta = abs(self.min_color_temp - self.sleep_color_temp)
-            ct = (delta * abs(1 + sun_position)) + self.sleep_color_temp
-            return 5 * round(ct / 5)  # round to nearest 5
-        msg = "Should not happen"
-        raise ValueError(msg)
+        delta = abs(self.min_color_temp - self.sleep_color_temp)
+        ct = (delta * abs(1 + sun_position)) + self.sleep_color_temp
+        return 5 * round(ct / 5)  # round to nearest 5
 
     def brightness_and_color(
         self,
@@ -345,6 +367,7 @@ class SunLightSettings:
     ) -> dict[str, Any]:
         """Calculate the brightness and color."""
         sun_position = self.sun.sun_position(dt)
+        in_sleep_transition = self._in_sleep_transition(dt, sun_position)
         rgb_color: tuple[int, int, int]
         # Variable `force_rgb_color` is needed for RGB color after sunset (if enabled)
         force_rgb_color = False
@@ -352,11 +375,7 @@ class SunLightSettings:
         if is_sleep:
             color_temp_kelvin = self.sleep_color_temp
             rgb_color = self.sleep_rgb_color
-        elif (
-            self.sleep_rgb_or_color_temp == "rgb_color"
-            and self.adapt_until_sleep
-            and sun_position < 0
-        ):
+        elif self.sleep_rgb_or_color_temp == "rgb_color" and in_sleep_transition:
             # Feature requested in
             # https://github.com/basnijholt/adaptive-lighting/issues/624
             # This will result in a perceptible jump in color at sunset and sunrise
@@ -367,10 +386,16 @@ class SunLightSettings:
                 self.sleep_rgb_color,
                 sun_position,
             )
-            color_temp_kelvin = self.color_temp_kelvin(sun_position)
+            color_temp_kelvin = self.color_temp_kelvin(
+                sun_position,
+                in_sleep_transition,
+            )
             force_rgb_color = True
         else:
-            color_temp_kelvin = self.color_temp_kelvin(sun_position)
+            color_temp_kelvin = self.color_temp_kelvin(
+                sun_position,
+                in_sleep_transition,
+            )
             r, g, b = color_temperature_to_rgb(color_temp_kelvin)
             rgb_color = (round(r), round(g), round(b))
         # backwards compatibility for versions < 1.3.1 - see #403
@@ -385,6 +410,7 @@ class SunLightSettings:
             "xy_color": xy_color,
             "hs_color": hs_color,
             "sun_position": sun_position,
+            "in_sleep_transition": in_sleep_transition,
             "force_rgb_color": force_rgb_color,
         }
 
