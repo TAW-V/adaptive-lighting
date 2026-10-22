@@ -40,6 +40,7 @@ from homeassistant.components.adaptive_lighting.const import (
     CONF_MAX_BRIGHTNESS,
     CONF_MIN_COLOR_TEMP,
     CONF_MULTI_LIGHT_INTERCEPT,
+    CONF_ONLY_ONCE,
     CONF_PREFER_RGB_COLOR,
     CONF_SEPARATE_TURN_ON_COMMANDS,
     CONF_SLEEP_MODE_SCENE,
@@ -824,6 +825,75 @@ async def test_sleep_mode_scene_transition_until_sleep(hass):
     await update_at(before_sunset)
     await update_at(after_sunset)
     assert len(script_calls) == 2
+
+
+@pytest.mark.parametrize("only_once", [False, True])
+async def test_sleep_mode_scene_hands_back_control_at_sunrise(hass, only_once):
+    """At sunrise the scene regime ends and Adaptive Lighting takes over again.
+
+    This uses the real interval path (`force=False`, `"interval"` context), and
+    the lights are flagged as manually controlled during the night (e.g. by the
+    scene's changes), which must not block the morning handover.
+    """
+    script_calls = async_mock_service(hass, "script", SERVICE_TURN_ON)
+    switch, _ = await setup_lights_and_switch(
+        hass,
+        {
+            CONF_SLEEP_MODE_SCENE: "script.bedtime",
+            CONF_ADAPT_UNTIL_SLEEP: True,
+            CONF_ONLY_ONCE: only_once,
+        },
+    )
+    lights = switch.lights
+
+    sunset = SUNSET.replace(tzinfo=dt_util.DEFAULT_TIME_ZONE).astimezone(dt_util.UTC)
+    sunrise = SUNRISE.replace(tzinfo=dt_util.DEFAULT_TIME_ZONE).astimezone(dt_util.UTC)
+    after_sunset = sunset + datetime.timedelta(hours=1)
+    after_sunrise = sunrise + datetime.timedelta(hours=2) + datetime.timedelta(days=1)
+
+    async def interval_at(time):
+        with patch(
+            "homeassistant.components.adaptive_lighting.color_and_brightness.utcnow",
+            return_value=time,
+        ):
+            await switch._update_attrs_and_maybe_adapt_lights(
+                context=switch.create_context("interval"),
+                transition=0,
+                force=False,
+            )
+            await hass.async_block_till_done()
+
+    # Night: the scene owns the lights.
+    await interval_at(after_sunset)
+    assert len(script_calls) == 1
+    assert switch._sleep_scene_active
+    # Simulate the scene dimming the lights (with a foreign context, as e.g. a
+    # Hue bridge scene would), leaving them flagged as manually controlled.
+    on_lights = [light for light in lights if hass.states.get(light).state == STATE_ON]
+    assert on_lights
+    for light in on_lights:
+        await hass.services.async_call(
+            LIGHT_DOMAIN,
+            SERVICE_TURN_ON,
+            {ATTR_ENTITY_ID: light, ATTR_BRIGHTNESS: 10},
+            blocking=True,
+            context=Context(),
+        )
+    await hass.async_block_till_done()
+    for light in lights:
+        switch.manager.set_manual_control_attributes(light)
+
+    # Morning: control is handed back, manual control cleared, lights adapted.
+    await interval_at(after_sunrise)
+    assert len(script_calls) == 1  # scene is not re-fired
+    assert not switch._sleep_scene_active
+    assert switch._settings["sun_position"] > 0
+    expected = round(255 * switch._settings["brightness_pct"] / 100)
+    assert expected != 10
+    for light in lights:
+        assert switch.manager.manual_control[light] == LightControlAttributes.NONE
+    for light in on_lights:
+        assert hass.states.get(light).attributes[ATTR_BRIGHTNESS] == expected
 
 
 async def test_transition_until_sleep_after_ramp(hass):

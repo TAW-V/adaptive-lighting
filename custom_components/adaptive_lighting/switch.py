@@ -1450,6 +1450,35 @@ class AdaptiveSwitch(SwitchEntity, RestoreEntity):
         """
         return bool(self._settings.get("in_sleep_transition"))
 
+    def _maybe_hand_back_from_sleep_scene(self) -> bool:
+        """Hand control back from the `sleep_mode_scene` when its regime has ended.
+
+        When the scene/script was activated via `transition_until_sleep` (so it
+        owns the lights) and the regime is no longer active, i.e. the sun has come
+        up, Adaptive Lighting takes over again: the scene's changes must not count
+        as manual control, so the manual-control state of all lights is reset.
+        Returns whether this happened, in which case the caller should
+        force-adapt all lights (so `only_once` does not block the handover).
+        Manual sleep mode is excluded: turning that off is handled by
+        `_sleep_mode_switch_state_event_action`.
+        """
+        if not (
+            self._sleep_scene_active
+            and self._sleep_mode_scene is not None
+            and not self.sleep_mode_switch.is_on
+            and not self._in_transition_until_sleep_scene_regime()
+        ):
+            return False
+        _LOGGER.debug(
+            "%s: Leaving the transition_until_sleep regime, handing control"
+            " back from 'sleep_mode_scene' ('%s') to Adaptive Lighting",
+            self._name,
+            self._sleep_mode_scene,
+        )
+        self._sleep_scene_active = False
+        self.manager.reset(*self.lights)
+        return True
+
     async def _maybe_handle_sleep_scene(self, context: Context) -> bool:
         """Hand the lights over to a configured `sleep_mode_scene`, if applicable.
 
@@ -1522,6 +1551,13 @@ class AdaptiveSwitch(SwitchEntity, RestoreEntity):
             ),
         )
         self.async_write_ha_state()
+
+        # Leaving the transition_until_sleep regime (sunrise) after the scene/script
+        # owned the lights: hand control back to Adaptive Lighting and force-adapt
+        # all lights (not only the one that triggered this call).
+        handed_back = self._maybe_hand_back_from_sleep_scene()
+        force = force or handed_back
+        lights = None if handed_back else lights
 
         # Hand over to a sleep-mode scene/script when applicable (manual sleep or
         # the transition_until_sleep regime), or skip when `only_once` is set and
