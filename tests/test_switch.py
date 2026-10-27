@@ -38,6 +38,10 @@ from homeassistant.components.adaptive_lighting.const import (
     CONF_BRIGHTNESS_MODE_TIME_DARK,
     CONF_BRIGHTNESS_MODE_TIME_LIGHT,
     CONF_DETECT_NON_HA_CHANGES,
+    CONF_EVENING_BRIGHTNESS,
+    CONF_EVENING_COLOR_TEMP,
+    CONF_EVENING_DURATION,
+    CONF_EVENING_HOLD,
     CONF_EXPAND_LIGHT_GROUPS,
     CONF_INITIAL_TRANSITION,
     CONF_MANUAL_CONTROL,
@@ -910,6 +914,24 @@ async def test_sleep_mode_scene_hands_back_control_at_sunrise(hass, only_once):
         assert switch.manager.manual_control[light] == LightControlAttributes.NONE
     for light in on_lights:
         assert hass.states.get(light).attributes[ATTR_BRIGHTNESS] == expected
+
+
+async def test_evening_options_are_applied(hass):
+    """The evening options reach the sun/light settings (durations as timedelta)."""
+    switch, _ = await setup_lights_and_switch(
+        hass,
+        {
+            CONF_EVENING_BRIGHTNESS: 60,
+            CONF_EVENING_COLOR_TEMP: 3000,
+            CONF_EVENING_DURATION: 7200,
+            CONF_EVENING_HOLD: 1800,
+        },
+    )
+    settings = switch._sun_light_settings
+    assert settings.evening_brightness == 60
+    assert settings.evening_color_temp == 3000
+    assert settings.evening_duration == datetime.timedelta(hours=2)
+    assert settings.evening_hold == datetime.timedelta(minutes=30)
 
 
 async def test_transition_until_sleep_after_ramp(hass):

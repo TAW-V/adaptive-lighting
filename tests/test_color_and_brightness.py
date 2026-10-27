@@ -1,4 +1,5 @@
 import datetime as dt
+import itertools
 import zoneinfo
 
 import astral.sun
@@ -547,3 +548,157 @@ def test_brightness_and_color_on_polar_days(date):
     at_midnight = settings.brightness_and_color(midnight, is_sleep=False)
     assert at_midnight["brightness_pct"] == 30
     assert at_midnight["color_temp_kelvin"] == 2000
+
+
+def _make_evening_settings(brightness_mode="default", **evening):
+    """SunLightSettings with fixed sunrise (07:00) and sunset (21:00) times."""
+    tz = zoneinfo.ZoneInfo("Europe/Amsterdam")
+    location = LocationInfo("Wageningen", "NL", "Europe/Amsterdam", 51.97, 5.66)
+    return SunLightSettings(
+        name="test",
+        astral_observer=location.observer,
+        adapt_until_sleep=False,
+        max_brightness=100,
+        max_color_temp=5500,
+        min_brightness=5,
+        min_color_temp=2200,
+        sleep_brightness=1,
+        sleep_rgb_or_color_temp="color_temp",
+        sleep_color_temp=1800,
+        sleep_rgb_color=(255, 56, 0),
+        sunrise_time=dt.time(7),
+        min_sunrise_time=None,
+        max_sunrise_time=None,
+        sunset_time=dt.time(21),
+        min_sunset_time=None,
+        max_sunset_time=None,
+        brightness_mode_time_dark=dt.timedelta(hours=1),
+        brightness_mode_time_light=dt.timedelta(minutes=30),
+        brightness_mode=brightness_mode,
+        timezone=tz,
+        **evening,
+    )
+
+
+_EVENING = {
+    "evening_brightness": 60,
+    "evening_color_temp": 3000,
+    "evening_duration": dt.timedelta(hours=2),
+    "evening_hold": dt.timedelta(hours=1),
+}
+
+
+def _at(day, hour, minute=0):
+    tz = zoneinfo.ZoneInfo("Europe/Amsterdam")
+    return dt.datetime(2026, 10, day, hour, minute, tzinfo=tz).astimezone(dt.UTC)
+
+
+def _minutes(start, end):
+    t = start
+    while t <= end:
+        yield t
+        t += dt.timedelta(minutes=1)
+
+
+@pytest.mark.parametrize(
+    "evening",
+    [
+        {},
+        {"evening_brightness": 0, "evening_color_temp": 0},
+        # At or above the maximums the evening phase has no effect.
+        {"evening_brightness": 100, "evening_color_temp": 9000},
+    ],
+)
+@pytest.mark.parametrize("brightness_mode", ["default", "linear", "tanh"])
+def test_evening_noop_matches_normal(evening, brightness_mode):
+    """Disabled (default) evening settings leave the curves untouched."""
+    normal = _make_evening_settings(brightness_mode)
+    other = _make_evening_settings(brightness_mode, **evening)
+    for t in _minutes(_at(27, 0), _at(28, 0)):
+        a = normal.brightness_and_color(t, is_sleep=False)
+        b = other.brightness_and_color(t, is_sleep=False)
+        assert a["brightness_pct"] == b["brightness_pct"]
+        assert a["color_temp_kelvin"] == b["color_temp_kelvin"]
+
+
+def test_evening_phase_values():
+    """Linear transition to the evening values, hold, then a dimmer sunset."""
+    normal = _make_evening_settings()
+    evening = _make_evening_settings(**_EVENING)
+
+    def values(settings, t):
+        out = settings.brightness_and_color(t, is_sleep=False)
+        return out["brightness_pct"], out["color_temp_kelvin"]
+
+    # Before the transition (starts at 21:00 - 1h hold - 2h = 18:00): unchanged.
+    for t in (_at(27, 12), _at(27, 17, 59)):
+        assert values(evening, t) == values(normal, t)
+        assert evening.evening_fraction(t) is None
+
+    # Halfway through the transition.
+    assert evening.evening_fraction(_at(27, 19)) == pytest.approx(0.5)
+    brightness, color_temp = values(evening, _at(27, 19))
+    _, normal_color_temp = values(normal, _at(27, 19))
+    assert brightness == pytest.approx(80)
+    assert color_temp == pytest.approx((normal_color_temp + 3000) / 2, abs=5)
+
+    # End of the transition (20:00): evening values reached and held.
+    assert values(evening, _at(27, 20)) == (60, 3000)
+    for t in _minutes(_at(27, 20), _at(27, 21)):
+        brightness, color_temp = values(evening, t)
+        _, normal_color_temp = values(normal, t)
+        assert brightness == pytest.approx(60)
+        # Never cooler than the normal curve.
+        assert color_temp == min(3000, normal_color_temp)
+
+    # After sunset: the sunset dimming starts from 60% instead of 100%.
+    previous = 60.0
+    for t in _minutes(_at(27, 21, 1), _at(27, 23)):
+        brightness, color_temp = values(evening, t)
+        normal_brightness, normal_color_temp = values(normal, t)
+        assert brightness < previous
+        assert brightness < normal_brightness
+        assert color_temp == normal_color_temp
+        previous = brightness
+
+    # After solar midnight (02:00 here): back to the normal curves.
+    for t in (_at(28, 2, 1), _at(28, 6), _at(28, 12)):
+        assert evening.evening_fraction(t) is None
+        assert values(evening, t) == values(normal, t)
+
+
+@pytest.mark.parametrize("brightness_mode", ["default", "linear", "tanh"])
+def test_evening_phase_is_continuous(brightness_mode):
+    """No jumps when entering or leaving the evening phase."""
+    normal = _make_evening_settings(brightness_mode)
+    evening = _make_evening_settings(brightness_mode, **_EVENING)
+
+    def max_step(settings, key):
+        values = [
+            settings.brightness_and_color(t, is_sleep=False)[key]
+            for t in _minutes(_at(27, 12), _at(28, 12))
+        ]
+        return max(abs(b - a) for a, b in itertools.pairwise(values))
+
+    # The evening phase may change values faster than the normal curve, but
+    # never by more than a smooth per-minute step.
+    assert max_step(evening, "brightness_pct") <= max(
+        max_step(normal, "brightness_pct"),
+        1.0,
+    )
+    assert max_step(evening, "color_temp_kelvin") <= max(
+        max_step(normal, "color_temp_kelvin"),
+        25,
+    )
+
+
+def test_evening_without_duration_or_hold():
+    """With zero duration and hold, the evening values apply from sunset."""
+    settings = _make_evening_settings(
+        evening_brightness=60,
+        evening_duration=dt.timedelta(0),
+        evening_hold=dt.timedelta(0),
+    )
+    assert settings.evening_fraction(_at(27, 20, 59)) is None
+    assert settings.evening_fraction(_at(27, 21)) == 1.0
+    assert settings.brightness_and_color(_at(27, 21), False)["brightness_pct"] == 60

@@ -301,6 +301,76 @@ class SunLightSettings:
     sunset_offset: datetime.timedelta = datetime.timedelta()
     timezone: datetime.tzinfo = UTC
     transition_until_sleep_after_ramp: bool = False
+    # Evening phase (0 disables the brightness/color part respectively).
+    evening_brightness: int = 0
+    evening_color_temp: int = 0
+    evening_duration: datetime.timedelta = datetime.timedelta(hours=1)
+    evening_hold: datetime.timedelta = datetime.timedelta()
+
+    @cached_property
+    def _evening_brightness(self) -> float | None:
+        """The effective evening brightness, or None if disabled/no-op."""
+        if self.evening_brightness <= 0:
+            return None
+        value = clamp(self.evening_brightness, self.min_brightness, self.max_brightness)
+        return None if value >= self.max_brightness else value
+
+    @cached_property
+    def _evening_color_temp(self) -> float | None:
+        """The effective evening color temperature, or None if disabled."""
+        if self.evening_color_temp <= 0:
+            return None
+        return clamp(self.evening_color_temp, self.min_color_temp, self.max_color_temp)
+
+    def evening_fraction(self, dt: datetime.datetime) -> float | None:
+        """Progress of the evening phase at `dt`.
+
+        Returns None outside the evening phase, a value in [0, 1) during the
+        linear transition that ends `evening_hold` before the (adjusted) sunset,
+        and 1 from then until the solar midnight after that sunset. After solar
+        midnight the night values are reached, so the normal curves apply again.
+        """
+        if self._evening_brightness is None and self._evening_color_temp is None:
+            return None
+        now = dt.timestamp()
+        events = sorted(
+            (
+                event
+                for days in (-1, 0, 1)
+                for event in self.sun.sun_events(dt + timedelta(days=days))
+            ),
+            key=lambda x: x[1],
+        )
+        # Between a sunset and the following solar midnight: fully evening.
+        past = [event for event in events if event[1] <= now]
+        if past and past[-1][0] == SunEvent.SUNSET:
+            return 1.0
+        sunset_ts = next(
+            (ts for event, ts in events if event == SunEvent.SUNSET and ts > now),
+            None,
+        )
+        if sunset_ts is None:
+            return None
+        hold = max(self.evening_hold.total_seconds(), 0)
+        duration = max(self.evening_duration.total_seconds(), 0)
+        end = sunset_ts - hold
+        start = end - duration
+        # Never start before that day's sunrise.
+        sunrise_ts = max(
+            (
+                ts
+                for event, ts in events
+                if event == SunEvent.SUNRISE and ts < sunset_ts
+            ),
+            default=start,
+        )
+        start = max(start, sunrise_ts)
+        end = max(end, start)
+        if now < start:
+            return None
+        if now >= end:
+            return 1.0
+        return (now - start) / (end - start)
 
     @cached_property
     def sun(self) -> SunEvents:
@@ -319,15 +389,23 @@ class SunLightSettings:
             timezone=self.timezone,
         )
 
-    def _brightness_pct_default(self, dt: datetime.datetime) -> float:
+    def _brightness_pct_default(
+        self,
+        dt: datetime.datetime,
+        max_brightness: float,
+    ) -> float:
         """Calculate the brightness percentage using the default method."""
         sun_position = self.sun.sun_position(dt)
         if sun_position > 0:
-            return self.max_brightness
-        delta_brightness = self.max_brightness - self.min_brightness
+            return max_brightness
+        delta_brightness = max_brightness - self.min_brightness
         return (delta_brightness * (1 + sun_position)) + self.min_brightness
 
-    def _brightness_pct_tanh(self, dt: datetime.datetime) -> float:
+    def _brightness_pct_tanh(
+        self,
+        dt: datetime.datetime,
+        max_brightness: float,
+    ) -> float:
         event, ts_event = self.sun.closest_event(dt)
         dark = self.brightness_mode_time_dark.total_seconds()
         light = self.brightness_mode_time_light.total_seconds()
@@ -339,7 +417,7 @@ class SunLightSettings:
                 y1=0.05,  # be at 5% of range at x1
                 y2=0.95,  # be at 95% of range at x2
                 y_min=self.min_brightness,
-                y_max=self.max_brightness,
+                y_max=max_brightness,
             )
         elif event == SunEvent.SUNSET:
             brightness = scaled_tanh(
@@ -349,14 +427,18 @@ class SunLightSettings:
                 y1=0.95,  # be at 95% of range at the start of sunset
                 y2=0.05,  # be at 5% of range at the end of sunset
                 y_min=self.min_brightness,
-                y_max=self.max_brightness,
+                y_max=max_brightness,
             )
         else:
             msg = "Unsupported sun event"
             raise ValueError(msg)
-        return clamp(brightness, self.min_brightness, self.max_brightness)
+        return clamp(brightness, self.min_brightness, max_brightness)
 
-    def _brightness_pct_linear(self, dt: datetime.datetime) -> float:
+    def _brightness_pct_linear(
+        self,
+        dt: datetime.datetime,
+        max_brightness: float,
+    ) -> float:
         event, ts_event = self.sun.closest_event(dt)
         # at ts_event - dt_start, brightness == start_brightness
         # at ts_event + dt_end, brightness == end_brightness
@@ -368,32 +450,51 @@ class SunLightSettings:
                 x1=-dark,
                 x2=+light,
                 y1=self.min_brightness,
-                y2=self.max_brightness,
+                y2=max_brightness,
             )
         elif event == SunEvent.SUNSET:
             brightness = lerp(
                 dt.timestamp() - ts_event,
                 x1=-light,
                 x2=+dark,
-                y1=self.max_brightness,
+                y1=max_brightness,
                 y2=self.min_brightness,
             )
         else:
             msg = "Unsupported sun event"
             raise ValueError(msg)
-        return clamp(brightness, self.min_brightness, self.max_brightness)
+        return clamp(brightness, self.min_brightness, max_brightness)
 
     def brightness_pct(self, dt: datetime.datetime, is_sleep: bool) -> float | None:
         """Calculate the brightness in %."""
         if is_sleep:
             return self.sleep_brightness
+        brightness = self._brightness_pct_mode(dt, self.max_brightness)
+        evening = self._evening_brightness
+        if evening is None or brightness is None:
+            return brightness
+        fraction = self.evening_fraction(dt)
+        if fraction is None:
+            return brightness
+        # The sunset transition starts from the evening brightness instead of
+        # `max_brightness`; blend toward it during the evening transition.
+        evening_curve = self._brightness_pct_mode(dt, evening)
+        assert evening_curve is not None
+        return brightness + fraction * (evening_curve - brightness)
+
+    def _brightness_pct_mode(
+        self,
+        dt: datetime.datetime,
+        max_brightness: float,
+    ) -> float | None:
+        """Calculate the brightness in % for the configured mode and maximum."""
         assert self.brightness_mode in ("default", "linear", "tanh")
         if self.brightness_mode == "default":
-            return self._brightness_pct_default(dt)
+            return self._brightness_pct_default(dt, max_brightness)
         if self.brightness_mode == "linear":
-            return self._brightness_pct_linear(dt)
+            return self._brightness_pct_linear(dt, max_brightness)
         if self.brightness_mode == "tanh":
-            return self._brightness_pct_tanh(dt)
+            return self._brightness_pct_tanh(dt, max_brightness)
         return None
 
     def _in_sleep_transition(
@@ -420,11 +521,24 @@ class SunLightSettings:
         dark = self.brightness_mode_time_dark.total_seconds()
         return dt.timestamp() - prev_ts >= dark
 
-    def color_temp_kelvin(self, sun_position: float, in_sleep_transition: bool) -> int:
+    def color_temp_kelvin(
+        self,
+        sun_position: float,
+        in_sleep_transition: bool,
+        evening_fraction: float | None = None,
+    ) -> int:
         """Calculate the color temperature in Kelvin."""
+        evening = self._evening_color_temp
+        if evening is None:
+            evening_fraction = None
         if sun_position > 0:
             delta = self.max_color_temp - self.min_color_temp
             ct = (delta * sun_position) + self.min_color_temp
+            if evening_fraction is not None:
+                # Evening phase: blend toward (and then hold) the evening value,
+                # but never make the light cooler than the normal curve.
+                assert evening is not None
+                ct = min(ct, ct + evening_fraction * (evening - ct))
             return 5 * round(ct / 5)  # round to nearest 5
         if not in_sleep_transition:
             return self.min_color_temp
@@ -440,6 +554,7 @@ class SunLightSettings:
         """Calculate the brightness and color."""
         sun_position = self.sun.sun_position(dt)
         in_sleep_transition = self._in_sleep_transition(dt, sun_position)
+        evening_fraction = self.evening_fraction(dt)
         rgb_color: tuple[int, int, int]
         # Variable `force_rgb_color` is needed for RGB color after sunset (if enabled)
         force_rgb_color = False
@@ -461,12 +576,14 @@ class SunLightSettings:
             color_temp_kelvin = self.color_temp_kelvin(
                 sun_position,
                 in_sleep_transition,
+                evening_fraction,
             )
             force_rgb_color = True
         else:
             color_temp_kelvin = self.color_temp_kelvin(
                 sun_position,
                 in_sleep_transition,
+                evening_fraction,
             )
             r, g, b = color_temperature_to_rgb(color_temp_kelvin)
             rgb_color = (round(r), round(g), round(b))
@@ -484,6 +601,7 @@ class SunLightSettings:
             "sun_position": sun_position,
             "in_sleep_transition": in_sleep_transition,
             "force_rgb_color": force_rgb_color,
+            "evening_fraction": evening_fraction,
         }
 
     def get_settings(
