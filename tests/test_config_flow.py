@@ -14,6 +14,7 @@ from homeassistant.components.adaptive_lighting.const import (
     CONF_EXPAND_LIGHT_GROUPS,
     CONF_INITIAL_TRANSITION,
     CONF_MANUAL_CONTROL_ON_EXTERNAL_TURN_ON,
+    CONF_SLEEP_MODE_SCENE,
     CONF_SUNRISE_TIME,
     CONF_SUNSET_TIME,
     DEFAULT_MANUAL_CONTROL_ON_EXTERNAL_TURN_ON,
@@ -33,8 +34,12 @@ DEFAULT_DATA = {key: default for key, default, _ in VALIDATION_TUPLES}
 
 # Split DEFAULT_DATA into basic and advanced for section-based input
 BASIC_DATA = {key: value for key, value in DEFAULT_DATA.items() if key in BASIC_OPTIONS}
+# An empty `sleep_mode_scene` entity picker is omitted from the submitted form
+# (its "None" sentinel is not a valid entity), so leave it out like the UI does.
 ADVANCED_DATA = {
-    key: value for key, value in DEFAULT_DATA.items() if key not in BASIC_OPTIONS
+    key: value
+    for key, value in DEFAULT_DATA.items()
+    if key not in BASIC_OPTIONS and key != CONF_SLEEP_MODE_SCENE
 }
 
 
