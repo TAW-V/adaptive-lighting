@@ -40,8 +40,8 @@ from homeassistant.components.adaptive_lighting.const import (
     CONF_DETECT_NON_HA_CHANGES,
     CONF_EVENING_BRIGHTNESS,
     CONF_EVENING_COLOR_TEMP,
-    CONF_EVENING_DURATION,
     CONF_EVENING_HOLD,
+    CONF_EVENING_OFFSET,
     CONF_EXPAND_LIGHT_GROUPS,
     CONF_INITIAL_TRANSITION,
     CONF_MANUAL_CONTROL,
@@ -942,14 +942,14 @@ async def test_evening_options_are_applied(hass):
         {
             CONF_EVENING_BRIGHTNESS: 60,
             CONF_EVENING_COLOR_TEMP: 3000,
-            CONF_EVENING_DURATION: 7200,
+            CONF_EVENING_OFFSET: 7200,
             CONF_EVENING_HOLD: 1800,
         },
     )
     settings = switch._sun_light_settings
     assert settings.evening_brightness == 60
     assert settings.evening_color_temp == 3000
-    assert settings.evening_duration == datetime.timedelta(hours=2)
+    assert settings.evening_offset == datetime.timedelta(hours=2)
     assert settings.evening_hold == datetime.timedelta(minutes=30)
 
 
