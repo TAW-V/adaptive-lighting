@@ -304,7 +304,7 @@ class SunLightSettings:
     # Evening phase (0 disables the brightness/color part respectively).
     evening_brightness: int = 0
     evening_color_temp: int = 0
-    evening_duration: datetime.timedelta = datetime.timedelta(hours=1)
+    evening_offset: datetime.timedelta = datetime.timedelta(hours=1)
     evening_hold: datetime.timedelta = datetime.timedelta()
 
     @cached_property
@@ -326,8 +326,9 @@ class SunLightSettings:
         """Progress of the evening phase at `dt`.
 
         Returns None outside the evening phase, a value in [0, 1) during the
-        linear transition that ends `evening_hold` before the (adjusted) sunset,
-        and 1 from then until the solar midnight after that sunset. After solar
+        linear transition from `evening_offset` until `evening_hold` before the
+        (adjusted) sunset, and 1 from then until the solar midnight after that
+        sunset. After solar
         midnight the night values are reached, so the normal curves apply again.
         """
         if self._evening_brightness is None and self._evening_color_temp is None:
@@ -352,9 +353,9 @@ class SunLightSettings:
         if sunset_ts is None:
             return None
         hold = max(self.evening_hold.total_seconds(), 0)
-        duration = max(self.evening_duration.total_seconds(), 0)
+        offset = max(self.evening_offset.total_seconds(), 0)
+        start = sunset_ts - offset
         end = sunset_ts - hold
-        start = end - duration
         # Never start before that day's sunrise.
         sunrise_ts = max(
             (
@@ -477,10 +478,11 @@ class SunLightSettings:
         if fraction is None:
             return brightness
         # The sunset transition starts from the evening brightness instead of
-        # `max_brightness`; blend toward it during the evening transition.
+        # `max_brightness`; blend toward it during the evening transition. The
+        # normal brightness wins whenever it is darker.
         evening_curve = self._brightness_pct_mode(dt, evening)
         assert evening_curve is not None
-        return brightness + fraction * (evening_curve - brightness)
+        return min(brightness, brightness + fraction * (evening_curve - brightness))
 
     def _brightness_pct_mode(
         self,

@@ -583,7 +583,7 @@ def _make_evening_settings(brightness_mode="default", **evening):
 _EVENING = {
     "evening_brightness": 60,
     "evening_color_temp": 3000,
-    "evening_duration": dt.timedelta(hours=2),
+    "evening_offset": dt.timedelta(hours=3),
     "evening_hold": dt.timedelta(hours=1),
 }
 
@@ -692,13 +692,61 @@ def test_evening_phase_is_continuous(brightness_mode):
     )
 
 
-def test_evening_without_duration_or_hold():
-    """With zero duration and hold, the evening values apply from sunset."""
+def test_evening_without_offset_or_hold():
+    """With zero offset and hold, the evening values apply from sunset."""
     settings = _make_evening_settings(
         evening_brightness=60,
-        evening_duration=dt.timedelta(0),
+        evening_offset=dt.timedelta(0),
         evening_hold=dt.timedelta(0),
     )
     assert settings.evening_fraction(_at(27, 20, 59)) is None
     assert settings.evening_fraction(_at(27, 21)) == 1.0
     assert settings.brightness_and_color(_at(27, 21), False)["brightness_pct"] == 60
+
+
+@pytest.mark.parametrize("brightness_mode", ["default", "linear", "tanh"])
+@pytest.mark.parametrize(
+    "evening",
+    [
+        _EVENING,
+        # Evening values that only partially apply: bright but warm, dim but cool.
+        {**_EVENING, "evening_brightness": 95, "evening_color_temp": 2300},
+        {**_EVENING, "evening_brightness": 20, "evening_color_temp": 5000},
+        # Very long transition (starts before the normal curves dim).
+        {**_EVENING, "evening_offset": dt.timedelta(hours=8)},
+    ],
+)
+def test_evening_never_brighter_or_cooler_than_normal(brightness_mode, evening):
+    """Brightness and color each keep the normal value when it is darker/warmer."""
+    normal = _make_evening_settings(brightness_mode)
+    settings = _make_evening_settings(brightness_mode, **evening)
+    for t in _minutes(_at(27, 0), _at(28, 12)):
+        a = normal.brightness_and_color(t, is_sleep=False)
+        b = settings.brightness_and_color(t, is_sleep=False)
+        assert b["brightness_pct"] <= a["brightness_pct"] + 1e-9
+        assert b["color_temp_kelvin"] <= a["color_temp_kelvin"]
+
+
+def test_evening_normal_overrules_per_attribute():
+    """A warmer normal color wins on its own, while the brightness still dims."""
+    normal = _make_evening_settings()
+    # 5000 K is cooler than the normal color during the evening hold.
+    settings = _make_evening_settings(**{**_EVENING, "evening_color_temp": 5000})
+    t = _at(27, 20, 30)  # in the hold
+    a = normal.brightness_and_color(t, is_sleep=False)
+    b = settings.brightness_and_color(t, is_sleep=False)
+    assert a["color_temp_kelvin"] < 5000
+    assert b["color_temp_kelvin"] == a["color_temp_kelvin"]
+    assert b["brightness_pct"] == pytest.approx(60)
+    assert a["brightness_pct"] == 100
+
+
+def test_evening_offset_smaller_than_hold_jumps_at_offset():
+    """An offset smaller than the hold applies the evening values at the offset."""
+    settings = _make_evening_settings(
+        evening_brightness=60,
+        evening_offset=dt.timedelta(hours=1),
+        evening_hold=dt.timedelta(hours=2),
+    )
+    assert settings.evening_fraction(_at(27, 19, 59)) is None
+    assert settings.evening_fraction(_at(27, 20)) == 1.0

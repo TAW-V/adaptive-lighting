@@ -233,9 +233,10 @@ DOCS[CONF_BRIGHTNESS_MODE_TIME_LIGHT] = (
 
 CONF_EVENING_BRIGHTNESS, DEFAULT_EVENING_BRIGHTNESS = "evening_brightness", 0
 DOCS[CONF_EVENING_BRIGHTNESS] = (
-    "Brightness percentage reached at the end of the evening phase, i.e. when "
-    "the sunset transition begins. The sunset transition then dims from this "
-    "value instead of from `max_brightness`. Set to 0 to disable. 🌆"
+    "Brightness percentage reached at the end of the evening transition and "
+    "held until the sunset transition, which then dims from this value instead "
+    "of from `max_brightness`. Never brighter than the normal brightness. Set "
+    "to 0 to disable. 🌆"
 )
 CONF_EVENING_COLOR_TEMP, DEFAULT_EVENING_COLOR_TEMP = "evening_color_temp", 0
 DOCS[CONF_EVENING_COLOR_TEMP] = (
@@ -244,16 +245,16 @@ DOCS[CONF_EVENING_COLOR_TEMP] = (
     "than the normal sun-based color. The night color is unchanged. Set to 0 "
     "to disable. 🌆"
 )
-CONF_EVENING_DURATION, DEFAULT_EVENING_DURATION = "evening_duration", 3600
-DOCS[CONF_EVENING_DURATION] = (
-    "Duration in seconds of the linear transition from the daytime values to "
-    "`evening_brightness`/`evening_color_temp`. It ends `evening_hold` "
-    "seconds before sunset (including `sunset_offset`). 🌆"
+CONF_EVENING_OFFSET, DEFAULT_EVENING_OFFSET = "evening_offset", 3600
+DOCS[CONF_EVENING_OFFSET] = (
+    "Time in seconds before sunset (including `sunset_offset`) at which the "
+    "linear transition from the daytime values to `evening_brightness`/"
+    "`evening_color_temp` starts. Should be larger than `evening_hold`. 🌆"
 )
 CONF_EVENING_HOLD, DEFAULT_EVENING_HOLD = "evening_hold", 0
 DOCS[CONF_EVENING_HOLD] = (
-    "Time in seconds between reaching the evening values and sunset (including "
-    "`sunset_offset`). The evening values are held during this time. 🌆"
+    "Time in seconds before sunset (including `sunset_offset`) at which the "
+    "evening values are reached; they are held until sunset. 🌆"
 )
 
 CONF_TAKE_OVER_CONTROL, DEFAULT_TAKE_OVER_CONTROL = "take_over_control", True
@@ -486,7 +487,7 @@ VALIDATION_TUPLES: list[tuple[str, Any, Any]] = [
     (CONF_BRIGHTNESS_MODE_TIME_LIGHT, DEFAULT_BRIGHTNESS_MODE_TIME_LIGHT, int),
     (CONF_EVENING_BRIGHTNESS, DEFAULT_EVENING_BRIGHTNESS, int_between(0, 100)),
     (CONF_EVENING_COLOR_TEMP, DEFAULT_EVENING_COLOR_TEMP, int_between(0, 10000)),
-    (CONF_EVENING_DURATION, DEFAULT_EVENING_DURATION, int),
+    (CONF_EVENING_OFFSET, DEFAULT_EVENING_OFFSET, int),
     (CONF_EVENING_HOLD, DEFAULT_EVENING_HOLD, int),
     (CONF_TAKE_OVER_CONTROL, DEFAULT_TAKE_OVER_CONTROL, bool),
     (
@@ -558,7 +559,7 @@ EXTRA_VALIDATION: dict[str, tuple[Any, Any]] = {
     CONF_MAX_SUNSET_TIME: (cv.time, str),
     CONF_BRIGHTNESS_MODE_TIME_LIGHT: (cv.time_period, timedelta_as_int),
     CONF_BRIGHTNESS_MODE_TIME_DARK: (cv.time_period, timedelta_as_int),
-    CONF_EVENING_DURATION: (cv.time_period, timedelta_as_int),
+    CONF_EVENING_OFFSET: (cv.time_period, timedelta_as_int),
     CONF_EVENING_HOLD: (cv.time_period, timedelta_as_int),
 }
 
