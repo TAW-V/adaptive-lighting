@@ -103,7 +103,7 @@ from .const import (
     CONF_DETECT_NON_HA_CHANGES,
     CONF_EVENING_BRIGHTNESS,
     CONF_EVENING_COLOR_TEMP,
-    CONF_EVENING_HOLD,
+    CONF_EVENING_DURATION,
     CONF_EVENING_OFFSET,
     CONF_EXPAND_LIGHT_GROUPS,
     CONF_INCLUDE_CONFIG_IN_ATTRIBUTES,
@@ -1060,7 +1060,7 @@ class AdaptiveSwitch(SwitchEntity, RestoreEntity):
             evening_brightness=data[CONF_EVENING_BRIGHTNESS],
             evening_color_temp=data[CONF_EVENING_COLOR_TEMP],
             evening_offset=data[CONF_EVENING_OFFSET],
-            evening_hold=data[CONF_EVENING_HOLD],
+            evening_duration=data[CONF_EVENING_DURATION],
             timezone=zoneinfo.ZoneInfo(self.hass.config.time_zone),
         )
         _LOGGER.debug(

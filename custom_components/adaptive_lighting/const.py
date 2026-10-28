@@ -245,16 +245,18 @@ DOCS[CONF_EVENING_COLOR_TEMP] = (
     "than the normal sun-based color. The night color is unchanged. Set to 0 "
     "to disable. 🌆"
 )
-CONF_EVENING_OFFSET, DEFAULT_EVENING_OFFSET = "evening_offset", 3600
+CONF_EVENING_OFFSET, DEFAULT_EVENING_OFFSET = "evening_offset", 0
 DOCS[CONF_EVENING_OFFSET] = (
-    "Time in seconds before sunset (including `sunset_offset`) at which the "
-    "linear transition from the daytime values to `evening_brightness`/"
-    "`evening_color_temp` starts. Should be larger than `evening_hold`. 🌆"
+    "Start of the evening transition, in seconds relative to the real "
+    "(astronomical) sunset: positive is after, negative before sunset. Not "
+    "affected by `sunset_offset`/`sunset_time`/`min_sunset_time`/"
+    "`max_sunset_time`. 🌆"
 )
-CONF_EVENING_HOLD, DEFAULT_EVENING_HOLD = "evening_hold", 0
-DOCS[CONF_EVENING_HOLD] = (
-    "Time in seconds before sunset (including `sunset_offset`) at which the "
-    "evening values are reached; they are held until sunset. 🌆"
+CONF_EVENING_DURATION, DEFAULT_EVENING_DURATION = "evening_duration", 3600
+DOCS[CONF_EVENING_DURATION] = (
+    "Duration in seconds of the linear transition to `evening_brightness`/"
+    "`evening_color_temp`. The evening values are then held until Adaptive "
+    "Lighting's own sunset transition takes over. 🌆"
 )
 
 CONF_TAKE_OVER_CONTROL, DEFAULT_TAKE_OVER_CONTROL = "take_over_control", True
@@ -488,7 +490,7 @@ VALIDATION_TUPLES: list[tuple[str, Any, Any]] = [
     (CONF_EVENING_BRIGHTNESS, DEFAULT_EVENING_BRIGHTNESS, int_between(0, 100)),
     (CONF_EVENING_COLOR_TEMP, DEFAULT_EVENING_COLOR_TEMP, int_between(0, 10000)),
     (CONF_EVENING_OFFSET, DEFAULT_EVENING_OFFSET, int),
-    (CONF_EVENING_HOLD, DEFAULT_EVENING_HOLD, int),
+    (CONF_EVENING_DURATION, DEFAULT_EVENING_DURATION, int),
     (CONF_TAKE_OVER_CONTROL, DEFAULT_TAKE_OVER_CONTROL, bool),
     (
         CONF_TAKE_OVER_CONTROL_MODE,
@@ -560,7 +562,7 @@ EXTRA_VALIDATION: dict[str, tuple[Any, Any]] = {
     CONF_BRIGHTNESS_MODE_TIME_LIGHT: (cv.time_period, timedelta_as_int),
     CONF_BRIGHTNESS_MODE_TIME_DARK: (cv.time_period, timedelta_as_int),
     CONF_EVENING_OFFSET: (cv.time_period, timedelta_as_int),
-    CONF_EVENING_HOLD: (cv.time_period, timedelta_as_int),
+    CONF_EVENING_DURATION: (cv.time_period, timedelta_as_int),
 }
 
 
