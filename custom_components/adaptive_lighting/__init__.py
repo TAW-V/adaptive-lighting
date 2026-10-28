@@ -111,7 +111,7 @@ _ENTRY_METHODS_RETURN_NONE = hasattr(
 )
 
 
-def _entry_method_result(ok: bool) -> bool | None:
+def _entry_method_result(*, ok: bool) -> bool | None:
     """Return value for a config entry method that succeeded (or not)."""
     if _ENTRY_METHODS_RETURN_NONE and ok:
         return None
@@ -119,7 +119,8 @@ def _entry_method_result(ok: bool) -> bool | None:
 
 
 async def async_setup_entry(
-    hass: HomeAssistant, config_entry: ConfigEntry
+    hass: HomeAssistant,
+    config_entry: ConfigEntry,
 ) -> bool | None:
     """Set up the component."""
     data = hass.data.setdefault(DOMAIN, {})
@@ -132,7 +133,7 @@ async def async_setup_entry(
     data[config_entry.entry_id] = {UNDO_UPDATE_LISTENER: undo_listener}
     await hass.config_entries.async_forward_entry_setups(config_entry, PLATFORMS)
 
-    return _entry_method_result(True)
+    return _entry_method_result(ok=True)
 
 
 async def async_update_options(hass: HomeAssistant, config_entry: ConfigEntry) -> None:
@@ -162,4 +163,4 @@ async def async_unload_entry(
     if not data:
         hass.data.pop(DOMAIN)
 
-    return _entry_method_result(unload_ok)
+    return _entry_method_result(ok=unload_ok)
