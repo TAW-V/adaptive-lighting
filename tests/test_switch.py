@@ -134,7 +134,7 @@ from homeassistant.const import (
     EntityCategory,
 )
 from homeassistant.core import Context, CoreState, Event, HomeAssistant, State
-from homeassistant.exceptions import Unauthorized
+from homeassistant.exceptions import ServiceValidationError, Unauthorized
 from homeassistant.helpers import area_registry as ar
 from homeassistant.helpers import entity_registry
 from homeassistant.helpers.entity_platform import async_get_platforms
@@ -4375,6 +4375,72 @@ async def test_group_manual_control_service(hass, expand, cleanup):
     )
     await hass.async_block_till_done()
     assert hass.states.get(switch.entity_id).attributes["manual_control"] == []
+
+
+@pytest.mark.parametrize("service", [SERVICE_SET_MANUAL_CONTROL, SERVICE_APPLY])
+async def test_group_spanning_profiles_in_light_only_service(hass, service, cleanup):
+    """A group whose members are in different profiles is split per profile."""
+    await setup_lights(hass, with_group=True)
+    _, switch_4 = await _setup_group_switch(
+        hass,
+        name="four",
+        lights=["light.light_4"],
+        min_brightness=40,
+        max_brightness=40,
+    )
+    _, switch_5 = await _setup_group_switch(
+        hass,
+        name="five",
+        lights=["light.light_5"],
+        min_brightness=20,
+        max_brightness=20,
+    )
+    await hass.services.async_call(
+        LIGHT_DOMAIN,
+        SERVICE_TURN_ON,
+        {ATTR_ENTITY_ID: "light.light_group"},
+        blocking=True,
+    )
+    await hass.async_block_till_done()
+    for switch, light in ((switch_4, "light.light_4"), (switch_5, "light.light_5")):
+        switch.manager.set_manual_control_attributes(light)
+        await hass.services.async_call(
+            LIGHT_DOMAIN,
+            SERVICE_TURN_ON,
+            {ATTR_ENTITY_ID: light, ATTR_BRIGHTNESS: 255},
+            blocking=True,
+            context=Context(),
+        )
+    await hass.async_block_till_done()
+
+    data = {CONF_LIGHTS: ["light.light_group"]}
+    if service == SERVICE_SET_MANUAL_CONTROL:
+        data[CONF_MANUAL_CONTROL] = False
+    await hass.services.async_call(DOMAIN, service, data, blocking=True)
+    await hass.async_block_till_done()
+
+    for switch, light, pct in (
+        (switch_4, "light.light_4", 40),
+        (switch_5, "light.light_5", 20),
+    ):
+        assert hass.states.get(light).attributes[ATTR_BRIGHTNESS] == round(
+            255 * pct / 100,
+        )
+        if service == SERVICE_SET_MANUAL_CONTROL:
+            assert switch.manager.manual_control[light] == LightControlAttributes.NONE
+
+
+async def test_light_only_service_without_profile_raises(hass, cleanup):
+    """Lights that are in no profile still give a clear error."""
+    await setup_lights(hass, with_group=True)
+    await _setup_group_switch(hass, name="four", lights=["light.light_4"])
+    with pytest.raises(ServiceValidationError, match="not found in any switch"):
+        await hass.services.async_call(
+            DOMAIN,
+            SERVICE_SET_MANUAL_CONTROL,
+            {CONF_LIGHTS: ["light.light_1"], CONF_MANUAL_CONTROL: False},
+            blocking=True,
+        )
 
 
 @pytest.mark.parametrize("shared_member", [False, True])

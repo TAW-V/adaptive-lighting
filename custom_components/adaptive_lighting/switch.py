@@ -381,6 +381,45 @@ def _switches_from_service_call(
     raise ServiceValidationError(msg)
 
 
+def _switch_targets_from_service_call(
+    hass: HomeAssistant,
+    service_call: ServiceCall,
+) -> list[tuple[AdaptiveSwitch, list[str]]]:
+    """Get the switches and the lights each should handle for a service call.
+
+    With a switch in `entity_id`, the passed lights (or all of the switch's
+    lights) are handled by that switch. With only `lights`, each light is
+    handled by the profile it belongs to: when the lights (e.g. a light group
+    whose members are in different profiles) span several profiles, they are
+    split per profile instead of being rejected.
+    """
+    lights = service_call.data.get(CONF_LIGHTS)
+    if service_call.data.get("entity_id") or not lights:
+        return [
+            (switch, switch._resolve_lights(lights or None))
+            for switch in _switches_from_service_call(hass, service_call)
+        ]
+    try:
+        switch = _switch_with_lights(hass, lights)
+    except NoSwitchFoundError:
+        pass
+    else:
+        return [(switch, switch._resolve_lights(lights))]
+
+    targets: dict[str, tuple[AdaptiveSwitch, list[str]]] = {}
+    for light in _expand_light_groups(hass, lights):
+        try:
+            switch = _switch_with_lights(hass, [light])
+        except NoSwitchFoundError as err:
+            _LOGGER.debug("Skipping '%s' in service call: %s", light, err)
+            continue
+        targets.setdefault(switch.entity_id, (switch, []))[1].append(light)
+    if not targets:
+        # Raises the appropriate error (no entries loaded / lights not found).
+        _switches_from_service_call(hass, service_call)
+    return list(targets.values())
+
+
 async def handle_change_switch_settings(
     switch: AdaptiveSwitch | SimpleSwitch,
     service_call: ServiceCall,
@@ -427,10 +466,7 @@ async def handle_apply_service(hass: HomeAssistant, service_call: ServiceCall) -
         "Called 'adaptive_lighting.apply' service with '%s'",
         data,
     )
-    switches = _switches_from_service_call(hass, service_call)
-    lights = data[CONF_LIGHTS]
-    for switch in switches:
-        all_lights = switch._resolve_lights(lights or None)
+    for switch, all_lights in _switch_targets_from_service_call(hass, service_call):
         switch.manager.lights.update(all_lights)
         for light in all_lights:
             if data[CONF_TURN_ON_LIGHTS] or is_on(hass, light):
@@ -462,10 +498,7 @@ async def handle_set_manual_control_service(
         "Called 'adaptive_lighting.set_manual_control' service with '%s'",
         data,
     )
-    switches = _switches_from_service_call(hass, service_call)
-    lights = data[CONF_LIGHTS]
-    for switch in switches:
-        all_lights = switch._resolve_lights(lights or None)
+    for switch, all_lights in _switch_targets_from_service_call(hass, service_call):
         manual_attributes = manual_control_event_attribute_to_flags(
             data[CONF_MANUAL_CONTROL],
         )
