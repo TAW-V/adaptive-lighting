@@ -866,6 +866,76 @@ async def test_sleep_mode_scene_transition_until_sleep(hass):
     assert len(script_calls) == 2
 
 
+async def test_sleep_mode_scene_reapplied_on_takeover(hass):
+    """Resetting manual control or `apply` re-applies the scene at night."""
+    script_calls = async_mock_service(hass, "script", SERVICE_TURN_ON)
+    switch, _ = await _setup_lights_and_switch_at_daytime(
+        hass,
+        {CONF_SLEEP_MODE_SCENE: "script.bedtime", CONF_ADAPT_UNTIL_SLEEP: True},
+    )
+    lights = switch.lights
+    sunset = SUNSET.replace(tzinfo=dt_util.DEFAULT_TIME_ZONE).astimezone(dt_util.UTC)
+    before_sunset = sunset - datetime.timedelta(hours=2)
+    after_sunset = sunset + datetime.timedelta(hours=1)
+
+    def at(time):
+        return patch(
+            "homeassistant.components.adaptive_lighting.color_and_brightness.utcnow",
+            return_value=time,
+        )
+
+    async def call(service, data):
+        await hass.services.async_call(
+            DOMAIN,
+            service,
+            {ATTR_ENTITY_ID: switch.entity_id, **data},
+            blocking=True,
+        )
+        await hass.async_block_till_done()
+
+    # Night: entering the regime fires the scene once.
+    with at(after_sunset):
+        await switch._update_attrs_and_maybe_adapt_lights(
+            context=switch.create_context("interval"),
+            transition=0,
+            force=False,
+        )
+        await hass.async_block_till_done()
+    assert len(script_calls) == 1
+    brightness = {
+        light: hass.states.get(light).attributes.get(ATTR_BRIGHTNESS)
+        for light in lights
+    }
+
+    # Resetting manual control re-applies the scene (and doesn't adapt).
+    with at(after_sunset):
+        await call(SERVICE_SET_MANUAL_CONTROL, {CONF_MANUAL_CONTROL: False})
+    assert len(script_calls) == 2
+    assert is_our_context(script_calls[-1].context, "scene")
+
+    # So does `apply`.
+    with at(after_sunset):
+        await call(SERVICE_APPLY, {})
+    assert len(script_calls) == 3
+    for light in lights:
+        assert hass.states.get(light).attributes.get(ATTR_BRIGHTNESS) == (
+            brightness[light]
+        )
+
+    # Changing settings does not re-fire it.
+    with at(after_sunset):
+        await call(
+            SERVICE_CHANGE_SWITCH_SETTINGS,
+            {CONF_SLEEP_MODE_SCENE: "script.bedtime"},
+        )
+    assert len(script_calls) == 3
+
+    # During the day, resetting manual control adapts as usual (no scene).
+    with at(before_sunset):
+        await call(SERVICE_SET_MANUAL_CONTROL, {CONF_MANUAL_CONTROL: False})
+    assert len(script_calls) == 3
+
+
 @pytest.mark.parametrize("only_once", [False, True])
 async def test_sleep_mode_scene_hands_back_control_at_sunrise(hass, only_once):
     """At sunrise the scene regime ends and Adaptive Lighting takes over again.

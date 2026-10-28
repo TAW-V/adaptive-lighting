@@ -468,6 +468,10 @@ async def handle_apply_service(hass: HomeAssistant, service_call: ServiceCall) -
     )
     for switch, all_lights in _switch_targets_from_service_call(hass, service_call):
         switch.manager.lights.update(all_lights)
+        if switch.is_on and await switch._maybe_reapply_sleep_scene(
+            switch.create_context("takeover", parent=service_call.context),
+        ):
+            continue  # The sleep scene/script owns these lights right now.
         for light in all_lights:
             if data[CONF_TURN_ON_LIGHTS] or is_on(hass, light):
                 context = switch.create_context(
@@ -513,8 +517,10 @@ async def handle_set_manual_control_service(
         else:
             switch.manager.reset(*all_lights)
             if switch.is_on:
+                # A "takeover" context: the user asks Adaptive Lighting to take
+                # control again, which re-applies a sleep scene that owns the lights.
                 context = switch.create_context(
-                    "service",
+                    "takeover",
                     parent=service_call.context,
                 )
                 await switch._update_attrs_and_maybe_adapt_lights(  # pylint: disable=protected-access
@@ -1641,6 +1647,20 @@ class AdaptiveSwitch(SwitchEntity, RestoreEntity):
         self.manager.reset(*self.lights)
         return True
 
+    async def _maybe_reapply_sleep_scene(self, context: Context) -> bool:
+        """Re-activate the sleep scene/script if it currently owns the lights.
+
+        Used by the `apply` service, which adapts lights directly instead of via
+        `_update_attrs_and_maybe_adapt_lights`. Returns whether the scene owns
+        the lights (so they should not be adapted).
+        """
+        if self._sleep_mode_scene is None:
+            return False
+        self._settings.update(
+            self._sun_light_settings.get_settings(self.sleep_mode_switch.is_on, None),
+        )
+        return await self._maybe_handle_sleep_scene(context)
+
     async def _maybe_handle_sleep_scene(self, context: Context) -> bool:
         """Hand the lights over to a configured `sleep_mode_scene`, if applicable.
 
@@ -1656,13 +1676,20 @@ class AdaptiveSwitch(SwitchEntity, RestoreEntity):
           interval - so manual changes made during the night are not repeatedly
           overwritten. The scene's own light changes (a `"scene"` context) never
           re-trigger it.
+
+        In both cases, an explicit request to (re)take control - resetting
+        manual control via `set_manual_control` or calling `apply` (a
+        `"takeover"` context) - re-activates the scene/script.
         """
         if self._sleep_mode_scene is None:
             self._sleep_scene_active = False
             return False
+        triggered_by_service = is_our_context(context, "takeover")
         if self.sleep_mode_switch.is_on:
             # Manual sleep mode: the toggle handler (re)fires the scene.
             self._sleep_scene_active = False
+            if triggered_by_service:
+                await self._activate_sleep_mode_scene(context)
             return True
         if not self._in_transition_until_sleep_scene_regime():
             self._sleep_scene_active = False
@@ -1675,14 +1702,17 @@ class AdaptiveSwitch(SwitchEntity, RestoreEntity):
             context,
             "scene",
         ) or is_our_context_id(context.parent_id, "scene")
-        if (entering or triggered_by_light_on) and not triggered_by_own_scene:
+        if (
+            entering or triggered_by_light_on or triggered_by_service
+        ) and not triggered_by_own_scene:
             _LOGGER.debug(
                 "%s: Activating 'sleep_mode_scene' ('%s') via transition_until_sleep"
-                " (entering=%s, light_on=%s)",
+                " (entering=%s, light_on=%s, service=%s)",
                 self._name,
                 self._sleep_mode_scene,
                 entering,
                 triggered_by_light_on,
+                triggered_by_service,
             )
             await self._activate_sleep_mode_scene(context)
         return True
