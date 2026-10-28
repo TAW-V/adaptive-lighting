@@ -61,8 +61,7 @@ from homeassistant.setup import async_setup_component
 from homeassistant.util import dt as dt_util
 from homeassistant.util import yaml as yaml_util
 
-from tests.common import async_fire_time_changed
-
+from .ha_test_helpers import async_fire_time_changed
 from .test_switch import setup_switch
 
 if TYPE_CHECKING:

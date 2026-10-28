@@ -18,7 +18,7 @@ from homeassistant.exceptions import ServiceValidationError
 from homeassistant.helpers import service
 from homeassistant.setup import async_setup_component
 
-from tests.common import MockConfigEntry
+from .ha_test_helpers import MockConfigEntry
 
 
 async def test_setup_with_config(hass):

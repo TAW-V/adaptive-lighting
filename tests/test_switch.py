@@ -144,8 +144,8 @@ from homeassistant.util.color import (
     color_temperature_mired_to_kelvin,
 )
 
-from tests.common import MockConfigEntry, async_mock_service
-from tests.common import mock_area_registry as mock_ha_area_registry
+from .ha_test_helpers import MockConfigEntry, async_mock_service
+from .ha_test_helpers import mock_area_registry as mock_ha_area_registry
 
 # HA 2026.6 removed the legacy `light: platform: template` YAML format
 # (home-assistant/core#169615); use the modern `template:` format there.
@@ -796,8 +796,7 @@ async def _setup_lights_and_switch_at_daytime(hass, extra_config):
     the sleep regime (and a `sleep_mode_scene`) before the test starts.
     """
     midday = (
-        SUNRISE.replace(tzinfo=dt_util.DEFAULT_TIME_ZONE)
-        + (SUNSET - SUNRISE) / 2
+        SUNRISE.replace(tzinfo=dt_util.DEFAULT_TIME_ZONE) + (SUNSET - SUNRISE) / 2
     ).astimezone(dt_util.UTC)
     with patch(
         "homeassistant.components.adaptive_lighting.color_and_brightness.utcnow",

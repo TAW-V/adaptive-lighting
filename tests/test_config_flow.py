@@ -28,7 +28,7 @@ from homeassistant.const import CONF_NAME
 from homeassistant.data_entry_flow import FlowResultType, section
 from homeassistant.helpers import config_validation as cv
 
-from tests.common import MockConfigEntry
+from .ha_test_helpers import MockConfigEntry
 
 DEFAULT_DATA = {key: default for key, default, _ in VALIDATION_TUPLES}
 

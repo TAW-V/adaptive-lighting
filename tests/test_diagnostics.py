@@ -43,9 +43,7 @@ from homeassistant.const import (
 )
 from homeassistant.core import State
 
-from tests.common import MockConfigEntry
-from tests.components.diagnostics import get_diagnostics_for_config_entry
-
+from .ha_test_helpers import MockConfigEntry, get_diagnostics_for_config_entry
 from .test_switch import (
     ENTITY_LIGHT_1,
     ENTITY_LIGHT_2,
