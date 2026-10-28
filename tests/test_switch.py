@@ -144,8 +144,8 @@ from homeassistant.util.color import (
     color_temperature_mired_to_kelvin,
 )
 
-from tests.common import MockConfigEntry, async_mock_service
-from tests.common import mock_area_registry as mock_ha_area_registry
+from .ha_test_helpers import MockConfigEntry, async_mock_service
+from .ha_test_helpers import mock_area_registry as mock_ha_area_registry
 
 # HA 2026.6 removed the legacy `light: platform: template` YAML format
 # (home-assistant/core#169615); use the modern `template:` format there.
@@ -788,10 +788,29 @@ async def test_sleep_mode_scene_delay(hass):
         assert switch._sleep_mode_scene_task is None
 
 
+async def _setup_lights_and_switch_at_daytime(hass, extra_config):
+    """Set up at a fixed daytime moment (between SUNRISE and SUNSET).
+
+    Setup adapts the lights immediately, so with `transition_until_sleep` it must
+    not run at the real wall-clock time: at night that would already activate
+    the sleep regime (and a `sleep_mode_scene`) before the test starts.
+    """
+    midday = (
+        SUNRISE.replace(tzinfo=dt_util.DEFAULT_TIME_ZONE) + (SUNSET - SUNRISE) / 2
+    ).astimezone(dt_util.UTC)
+    with patch(
+        "homeassistant.components.adaptive_lighting.color_and_brightness.utcnow",
+        return_value=midday,
+    ):
+        result = await setup_lights_and_switch(hass, extra_config)
+        await hass.async_block_till_done()
+    return result
+
+
 async def test_sleep_mode_scene_transition_until_sleep(hass):
     """With `transition_until_sleep`, the scene fires after sunset, not adaptation."""
     script_calls = async_mock_service(hass, "script", SERVICE_TURN_ON)
-    switch, _ = await setup_lights_and_switch(
+    switch, _ = await _setup_lights_and_switch_at_daytime(
         hass,
         {CONF_SLEEP_MODE_SCENE: "script.bedtime", CONF_ADAPT_UNTIL_SLEEP: True},
     )
@@ -856,7 +875,7 @@ async def test_sleep_mode_scene_hands_back_control_at_sunrise(hass, only_once):
     scene's changes), which must not block the morning handover.
     """
     script_calls = async_mock_service(hass, "script", SERVICE_TURN_ON)
-    switch, _ = await setup_lights_and_switch(
+    switch, _ = await _setup_lights_and_switch_at_daytime(
         hass,
         {
             CONF_SLEEP_MODE_SCENE: "script.bedtime",
@@ -938,7 +957,7 @@ async def test_transition_until_sleep_after_ramp(hass):
     """`transition_until_sleep_after_ramp` delays the transition until the dark ramp ends."""
     script_calls = async_mock_service(hass, "script", SERVICE_TURN_ON)
     dark_seconds = 3600
-    switch, _ = await setup_lights_and_switch(
+    switch, _ = await _setup_lights_and_switch_at_daytime(
         hass,
         {
             CONF_SLEEP_MODE_SCENE: "script.bedtime",

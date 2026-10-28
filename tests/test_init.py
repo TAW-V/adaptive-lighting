@@ -18,7 +18,7 @@ from homeassistant.exceptions import ServiceValidationError
 from homeassistant.helpers import service
 from homeassistant.setup import async_setup_component
 
-from tests.common import MockConfigEntry
+from .ha_test_helpers import MockConfigEntry
 
 
 async def test_setup_with_config(hass):
@@ -177,7 +177,7 @@ async def test_change_switch_settings_requires_entity_target(hass):
 
     with pytest.raises(
         voluptuous.error.MultipleInvalid,
-        match=r"must contain at least one of entity_id.*area_id",
+        match=r"at least one of.*entity_id.*area_id",
     ):
         await hass.services.async_call(
             adaptive_lighting.DOMAIN,
