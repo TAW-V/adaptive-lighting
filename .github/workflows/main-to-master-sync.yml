@@ -7,6 +7,8 @@ on:
 
 jobs:
   sync:
+    # Only the upstream repo keeps a `master` mirror of `main`.
+    if: github.repository == 'basnijholt/adaptive-lighting'
     runs-on: ubuntu-latest
 
     steps:

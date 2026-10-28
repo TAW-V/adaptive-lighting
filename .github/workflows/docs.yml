@@ -52,7 +52,8 @@ jobs:
           path: ./site
 
   deploy:
-    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+    # Only the upstream repo publishes the docs site (GitHub Pages).
+    if: github.repository == 'basnijholt/adaptive-lighting' && github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
