@@ -233,17 +233,15 @@ DOCS[CONF_BRIGHTNESS_MODE_TIME_LIGHT] = (
 
 CONF_EVENING_BRIGHTNESS, DEFAULT_EVENING_BRIGHTNESS = "evening_brightness", 0
 DOCS[CONF_EVENING_BRIGHTNESS] = (
-    "Brightness percentage reached at the end of the evening transition and "
-    "held until the sunset transition, which then dims from this value instead "
-    "of from `max_brightness`. Never brighter than the normal brightness. Set "
-    "to 0 to disable. 🌆"
+    "Maximum brightness percentage in the evening: the brightness transitions "
+    "to this value and stays there until the normal Adaptive Lighting "
+    "brightness gets darker, which then takes over. Set to 0 to disable. 🌆"
 )
 CONF_EVENING_COLOR_TEMP, DEFAULT_EVENING_COLOR_TEMP = "evening_color_temp", 0
 DOCS[CONF_EVENING_COLOR_TEMP] = (
-    "Coldest color temperature in Kelvin during the evening phase: the color "
-    "transitions to this value and is held until sunset, but is never cooler "
-    "than the normal sun-based color. The night color is unchanged. Set to 0 "
-    "to disable. 🌆"
+    "Coldest color temperature in Kelvin in the evening: the color transitions "
+    "to this value and stays there until the normal Adaptive Lighting color "
+    "gets warmer, which then takes over. Set to 0 to disable. 🌆"
 )
 CONF_EVENING_OFFSET, DEFAULT_EVENING_OFFSET = "evening_offset", 0
 DOCS[CONF_EVENING_OFFSET] = (
@@ -256,7 +254,7 @@ CONF_EVENING_DURATION, DEFAULT_EVENING_DURATION = "evening_duration", 3600
 DOCS[CONF_EVENING_DURATION] = (
     "Duration in seconds of the linear transition to `evening_brightness`/"
     "`evening_color_temp`. The evening values are then held until Adaptive "
-    "Lighting's own sunset transition takes over. 🌆"
+    "Lighting's own (darker/warmer) values take over. 🌆"
 )
 
 CONF_TAKE_OVER_CONTROL, DEFAULT_TAKE_OVER_CONTROL = "take_over_control", True
