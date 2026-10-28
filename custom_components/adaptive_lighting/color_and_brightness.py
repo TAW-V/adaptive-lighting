@@ -304,8 +304,8 @@ class SunLightSettings:
     # Evening phase (0 disables the brightness/color part respectively).
     evening_brightness: int = 0
     evening_color_temp: int = 0
-    evening_offset: datetime.timedelta = datetime.timedelta(hours=1)
-    evening_hold: datetime.timedelta = datetime.timedelta()
+    evening_offset: datetime.timedelta = datetime.timedelta()
+    evening_duration: datetime.timedelta = datetime.timedelta(hours=1)
 
     @cached_property
     def _evening_brightness(self) -> float | None:
@@ -325,11 +325,15 @@ class SunLightSettings:
     def evening_fraction(self, dt: datetime.datetime) -> float | None:
         """Progress of the evening phase at `dt`.
 
-        Returns None outside the evening phase, a value in [0, 1) during the
-        linear transition from `evening_offset` until `evening_hold` before the
-        (adjusted) sunset, and 1 from then until the solar midnight after that
-        sunset. After solar
-        midnight the night values are reached, so the normal curves apply again.
+        The evening transition starts at the *real* (astronomical) sunset plus
+        `evening_offset` (negative: before sunset) and takes `evening_duration`.
+        The evening values are then held until the solar midnight after the
+        (virtual, i.e. adjusted by `sunset_offset`/`sunset_time`/`min_sunset_time`/
+        `max_sunset_time`) sunset that Adaptive Lighting's curves use, after
+        which the night values are reached and the normal curves apply again.
+
+        Returns None outside the evening phase, the transition progress in
+        [0, 1) during the transition, and 1 after it.
         """
         if self._evening_brightness is None and self._evening_color_temp is None:
             return None
@@ -342,36 +346,48 @@ class SunLightSettings:
             ),
             key=lambda x: x[1],
         )
-        # Between a sunset and the following solar midnight: fully evening.
+        # The relevant (virtual) sunset: the one we're past (until the following
+        # solar midnight), otherwise the next one.
         past = [event for event in events if event[1] <= now]
         if past and past[-1][0] == SunEvent.SUNSET:
-            return 1.0
-        sunset_ts = next(
-            (ts for event, ts in events if event == SunEvent.SUNSET and ts > now),
-            None,
+            virtual_sunset_ts = past[-1][1]
+        else:
+            virtual_sunset_ts = next(
+                (ts for event, ts in events if event == SunEvent.SUNSET and ts > now),
+                None,
+            )
+            if virtual_sunset_ts is None:
+                return None
+        local_date = (
+            datetime.datetime.fromtimestamp(virtual_sunset_ts, UTC)
+            .astimezone(self.timezone)
+            .date()
         )
-        if sunset_ts is None:
+        try:
+            real_sunset = astral.sun.sunset(
+                self.astral_observer,
+                local_date,
+                tzinfo=self.timezone,
+            )
+        except ValueError:  # No sunset on this day (polar day/night).
             return None
-        hold = max(self.evening_hold.total_seconds(), 0)
-        offset = max(self.evening_offset.total_seconds(), 0)
-        start = sunset_ts - offset
-        end = sunset_ts - hold
+        start = real_sunset.timestamp() + self.evening_offset.total_seconds()
         # Never start before that day's sunrise.
         sunrise_ts = max(
             (
                 ts
                 for event, ts in events
-                if event == SunEvent.SUNRISE and ts < sunset_ts
+                if event == SunEvent.SUNRISE and ts < virtual_sunset_ts
             ),
             default=start,
         )
         start = max(start, sunrise_ts)
-        end = max(end, start)
+        duration = max(self.evening_duration.total_seconds(), 0)
         if now < start:
             return None
-        if now >= end:
+        if duration == 0 or now >= start + duration:
             return 1.0
-        return (now - start) / (end - start)
+        return (now - start) / duration
 
     @cached_property
     def sun(self) -> SunEvents:
