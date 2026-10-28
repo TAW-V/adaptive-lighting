@@ -493,12 +493,10 @@ class SunLightSettings:
         fraction = self.evening_fraction(dt)
         if fraction is None:
             return brightness
-        # The sunset transition starts from the evening brightness instead of
-        # `max_brightness`; blend toward it during the evening transition. The
-        # normal brightness wins whenever it is darker.
-        evening_curve = self._brightness_pct_mode(dt, evening)
-        assert evening_curve is not None
-        return min(brightness, brightness + fraction * (evening_curve - brightness))
+        # Blend toward the evening brightness during the evening transition,
+        # then hold it as a ceiling: the normal brightness wins whenever it is
+        # darker (e.g. once Adaptive Lighting's own sunset dimming goes below it).
+        return min(brightness, brightness + fraction * (evening - brightness))
 
     def _brightness_pct_mode(
         self,

@@ -665,15 +665,16 @@ def test_evening_is_anchored_to_the_real_sunset():
         assert brightness == pytest.approx(60)
         assert color_temp == min(3000, normal_color_temp)
 
-    # After the virtual sunset: the sunset dimming starts from 60% not 100%.
-    previous = 60.0
-    for t in _minutes(_at(27, 21, 1), _at(27, 23)):
+    # After the virtual sunset: 60% is a ceiling; once the normal sunset dimming
+    # goes below it, the normal brightness takes over.
+    took_over = False
+    for t in _minutes(_at(27, 21, 1), _at(27, 23, 59)):
         brightness, color_temp = _values(evening, t)
         normal_brightness, normal_color_temp = _values(normal, t)
-        assert brightness < previous
-        assert brightness < normal_brightness
+        assert brightness == pytest.approx(min(60, normal_brightness))
         assert color_temp == normal_color_temp
-        previous = brightness
+        took_over |= normal_brightness < 60
+    assert took_over
 
     # After the following solar midnight: back to the normal curves.
     for t in (_at(28, 4), _at(28, 12)):
