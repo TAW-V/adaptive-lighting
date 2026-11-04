@@ -169,7 +169,10 @@ CONF_SLEEP_MODE_SCENE_TRANSITION, DEFAULT_SLEEP_MODE_SCENE_TRANSITION = (
 DOCS[CONF_SLEEP_MODE_SCENE_TRANSITION] = (
     "Transition time in seconds used when activating `sleep_mode_scene`. Only "
     "applies to `scene` entities (passed to `scene.turn_on`); it is ignored for "
-    "scripts, which control their own transitions. ⏲️🎬"
+    "scripts, which control their own transitions. When the scene is "
+    "re-applied because a light turns on, or by `set_manual_control` with "
+    "`manual_control: false` or `apply`, it is applied instantly "
+    "(transition 0). ⏲️🎬"
 )
 
 CONF_SUNRISE_OFFSET, DEFAULT_SUNRISE_OFFSET = "sunrise_offset", 0
