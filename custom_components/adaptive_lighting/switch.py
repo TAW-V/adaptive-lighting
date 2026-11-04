@@ -1412,13 +1412,13 @@ class AdaptiveSwitch(SwitchEntity, RestoreEntity):
             transition,
         )
 
-        # In the transition_until_sleep regime the scene/script owns the lights,
-        # so don't proactively adapt them (e.g. on `light.turn_on`); the scene is
+        # In sleep mode or the transition_until_sleep regime the scene/script
+        # owns the lights, so don't proactively adapt them (e.g. on
+        # `light.turn_on`, which would flash the sleep color first); the scene is
         # (re)activated from `_update_attrs_and_maybe_adapt_lights`.
-        if (
-            self._sleep_mode_scene is not None
-            and not self.sleep_mode_switch.is_on
-            and self._in_transition_until_sleep_scene_regime()
+        if self._sleep_mode_scene is not None and (
+            self.sleep_mode_switch.is_on
+            or self._in_transition_until_sleep_scene_regime()
         ):
             return None
 
@@ -1679,17 +1679,36 @@ class AdaptiveSwitch(SwitchEntity, RestoreEntity):
 
         In both cases, an explicit request to (re)take control - resetting
         manual control via `set_manual_control` or calling `apply` (a
-        `"takeover"` context) - re-activates the scene/script.
+        `"takeover"` context) - and a light turning on re-activate the
+        scene/script. Those re-activations are instant (transition 0); only the
+        regular handover (sleep mode turning on, or entering the regime) uses
+        `sleep_mode_scene_transition`.
         """
         if self._sleep_mode_scene is None:
             self._sleep_scene_active = False
             return False
         triggered_by_service = is_our_context(context, "takeover")
+        triggered_by_light_on = is_our_context(context, "light_event")
+        triggered_by_own_scene = is_our_context(
+            context,
+            "scene",
+        ) or is_our_context_id(context.parent_id, "scene")
+        instant = (triggered_by_service or triggered_by_light_on) and (
+            not triggered_by_own_scene
+        )
         if self.sleep_mode_switch.is_on:
             # Manual sleep mode: the toggle handler (re)fires the scene.
             self._sleep_scene_active = False
-            if triggered_by_service:
-                await self._activate_sleep_mode_scene(context)
+            if instant:
+                _LOGGER.debug(
+                    "%s: Re-applying 'sleep_mode_scene' ('%s') in sleep mode"
+                    " (light_on=%s, service=%s)",
+                    self._name,
+                    self._sleep_mode_scene,
+                    triggered_by_light_on,
+                    triggered_by_service,
+                )
+                await self._activate_sleep_mode_scene(context, transition=0)
             return True
         if not self._in_transition_until_sleep_scene_regime():
             self._sleep_scene_active = False
@@ -1697,14 +1716,7 @@ class AdaptiveSwitch(SwitchEntity, RestoreEntity):
 
         entering = not self._sleep_scene_active
         self._sleep_scene_active = True
-        triggered_by_light_on = is_our_context(context, "light_event")
-        triggered_by_own_scene = is_our_context(
-            context,
-            "scene",
-        ) or is_our_context_id(context.parent_id, "scene")
-        if (
-            entering or triggered_by_light_on or triggered_by_service
-        ) and not triggered_by_own_scene:
+        if (entering or instant) and not triggered_by_own_scene:
             _LOGGER.debug(
                 "%s: Activating 'sleep_mode_scene' ('%s') via transition_until_sleep"
                 " (entering=%s, light_on=%s, service=%s)",
@@ -1714,7 +1726,10 @@ class AdaptiveSwitch(SwitchEntity, RestoreEntity):
                 triggered_by_light_on,
                 triggered_by_service,
             )
-            await self._activate_sleep_mode_scene(context)
+            await self._activate_sleep_mode_scene(
+                context,
+                transition=0 if instant else None,
+            )
         return True
 
     async def _update_attrs_and_maybe_adapt_lights(
@@ -1977,7 +1992,11 @@ class AdaptiveSwitch(SwitchEntity, RestoreEntity):
 
         self._sleep_mode_scene_task = self.hass.async_create_task(_delayed_activate())
 
-    async def _activate_sleep_mode_scene(self, context: Context) -> None:
+    async def _activate_sleep_mode_scene(
+        self,
+        context: Context,
+        transition: float | None = None,
+    ) -> None:
         """Activate the configured sleep-mode scene or run the script.
 
         A dedicated `"scene"` Adaptive Lighting context is used so that (a) AL
@@ -1991,8 +2010,12 @@ class AdaptiveSwitch(SwitchEntity, RestoreEntity):
         service_data: dict[str, Any] = {ATTR_ENTITY_ID: entity_id}
         # `scene.turn_on` supports a `transition`; `script.turn_on` does not, so
         # only add it for scenes (and only when set, to preserve #378's behavior).
-        if domain == "scene" and self._sleep_mode_scene_transition:
-            service_data[ATTR_TRANSITION] = self._sleep_mode_scene_transition
+        # An explicit `transition` (0 for an instant re-apply) overrides it.
+        if domain == "scene":
+            if transition is not None:
+                service_data[ATTR_TRANSITION] = transition
+            elif self._sleep_mode_scene_transition:
+                service_data[ATTR_TRANSITION] = self._sleep_mode_scene_transition
         _LOGGER.debug(
             "%s: Activating %s '%s' instead of adapting lights (service_data=%s)",
             self._name,

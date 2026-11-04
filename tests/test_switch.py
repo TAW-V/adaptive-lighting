@@ -1089,6 +1089,62 @@ async def test_sleep_mode_scene_transition_for_scene(hass):
     assert scene_calls[0].data[ATTR_TRANSITION] == 7
 
 
+async def test_sleep_mode_scene_reapplied_instantly(hass):
+    """Re-applying the scene (light on, manual-control reset) uses transition 0.
+
+    Only the regular handover (sleep mode turning on) uses
+    `sleep_mode_scene_transition`.
+    """
+    scene_calls = async_mock_service(hass, "scene", SERVICE_TURN_ON)
+    switch, _ = await setup_lights_and_switch(
+        hass,
+        {
+            CONF_SLEEP_MODE_SCENE: "scene.bedtime",
+            CONF_SLEEP_MODE_SCENE_TRANSITION: 7,
+            CONF_SLEEP_TRANSITION: 0,
+        },
+    )
+    await hass.services.async_call(
+        SWITCH_DOMAIN,
+        SERVICE_TURN_ON,
+        {ATTR_ENTITY_ID: switch.sleep_mode_switch.entity_id},
+        blocking=True,
+    )
+    await hass.async_block_till_done()
+    assert len(scene_calls) == 1
+    assert scene_calls[-1].data[ATTR_TRANSITION] == 7
+
+    # Resetting manual control re-applies the scene instantly.
+    await hass.services.async_call(
+        DOMAIN,
+        SERVICE_SET_MANUAL_CONTROL,
+        {ATTR_ENTITY_ID: switch.entity_id, CONF_MANUAL_CONTROL: False},
+        blocking=True,
+    )
+    await hass.async_block_till_done()
+    assert len(scene_calls) == 2
+    assert scene_calls[-1].data[ATTR_TRANSITION] == 0
+
+    # A light turning on from off re-applies it instantly too.
+    light = switch.lights[0]
+    await hass.services.async_call(
+        LIGHT_DOMAIN,
+        SERVICE_TURN_OFF,
+        {ATTR_ENTITY_ID: light},
+        blocking=True,
+    )
+    await hass.async_block_till_done()
+    await hass.services.async_call(
+        LIGHT_DOMAIN,
+        SERVICE_TURN_ON,
+        {ATTR_ENTITY_ID: light},
+        blocking=True,
+    )
+    await hass.async_block_till_done()
+    assert len(scene_calls) == 3
+    assert scene_calls[-1].data[ATTR_TRANSITION] == 0
+
+
 async def test_sleep_mode_scene_transition_ignored_for_script(hass):
     """The transition is not passed to `script.turn_on` (scripts don't accept it)."""
     script_calls = async_mock_service(hass, "script", SERVICE_TURN_ON)
