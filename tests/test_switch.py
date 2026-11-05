@@ -1145,6 +1145,65 @@ async def test_sleep_mode_scene_reapplied_instantly(hass):
     assert scene_calls[-1].data[ATTR_TRANSITION] == 0
 
 
+async def test_sleep_mode_scene_reapplied_per_light(hass):
+    """A light turning on gets only its own settings from the scene.
+
+    Other lights of the scene that are off stay off.
+    """
+    switch, _ = await setup_lights_and_switch(
+        hass,
+        {
+            CONF_SLEEP_MODE_SCENE: "scene.bedtime",
+            CONF_SLEEP_MODE_SCENE_TRANSITION: 7,
+            CONF_SLEEP_TRANSITION: 0,
+        },
+    )
+    assert await async_setup_component(
+        hass,
+        "scene",
+        {
+            "scene": [
+                {
+                    "name": "bedtime",
+                    "entities": {
+                        ENTITY_LIGHT_1: {"state": "on", ATTR_BRIGHTNESS: 10},
+                        ENTITY_LIGHT_2: {"state": "on", ATTR_BRIGHTNESS: 20},
+                    },
+                },
+            ],
+        },
+    )
+    await hass.async_block_till_done()
+
+    await hass.services.async_call(
+        SWITCH_DOMAIN,
+        SERVICE_TURN_ON,
+        {ATTR_ENTITY_ID: switch.sleep_mode_switch.entity_id},
+        blocking=True,
+    )
+    await hass.async_block_till_done()
+
+    for light in (ENTITY_LIGHT_1, ENTITY_LIGHT_2):
+        await hass.services.async_call(
+            LIGHT_DOMAIN,
+            SERVICE_TURN_OFF,
+            {ATTR_ENTITY_ID: light},
+            blocking=True,
+        )
+    await hass.async_block_till_done()
+
+    await hass.services.async_call(
+        LIGHT_DOMAIN,
+        SERVICE_TURN_ON,
+        {ATTR_ENTITY_ID: ENTITY_LIGHT_1},
+        blocking=True,
+    )
+    await hass.async_block_till_done()
+
+    assert hass.states.get(ENTITY_LIGHT_1).attributes[ATTR_BRIGHTNESS] == 10
+    assert hass.states.get(ENTITY_LIGHT_2).state == STATE_OFF
+
+
 async def test_sleep_mode_scene_transition_ignored_for_script(hass):
     """The transition is not passed to `script.turn_on` (scripts don't accept it)."""
     script_calls = async_mock_service(hass, "script", SERVICE_TURN_ON)

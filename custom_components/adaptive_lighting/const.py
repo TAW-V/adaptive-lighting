@@ -172,7 +172,8 @@ DOCS[CONF_SLEEP_MODE_SCENE_TRANSITION] = (
     "scripts, which control their own transitions. When the scene is "
     "re-applied because a light turns on, or by `set_manual_control` with "
     "`manual_control: false` or `apply`, it is applied instantly "
-    "(transition 0). ⏲️🎬"
+    "(transition 0); when a light turns on, only that light is set to its "
+    "state in the scene (for scenes defined in Home Assistant). ⏲️🎬"
 )
 
 CONF_SUNRISE_OFFSET, DEFAULT_SUNRISE_OFFSET = "sunrise_offset", 0

@@ -71,6 +71,7 @@ from homeassistant.helpers.event import (
     async_track_time_interval,
 )
 from homeassistant.helpers.restore_state import RestoreEntity
+from homeassistant.helpers.state import async_reproduce_state
 from homeassistant.util import slugify
 from homeassistant.util.color import (
     color_temperature_to_rgb,
@@ -1628,7 +1629,11 @@ class AdaptiveSwitch(SwitchEntity, RestoreEntity):
         )
         return await self._maybe_handle_sleep_scene(context)
 
-    async def _maybe_handle_sleep_scene(self, context: Context) -> bool:
+    async def _maybe_handle_sleep_scene(
+        self,
+        context: Context,
+        lights: list[str] | None = None,
+    ) -> bool:
         """Hand the lights over to a configured `sleep_mode_scene`, if applicable.
 
         Returns whether the scene/script owns the lights (so Adaptive Lighting
@@ -1649,7 +1654,9 @@ class AdaptiveSwitch(SwitchEntity, RestoreEntity):
         `"takeover"` context) - and a light turning on re-activate the
         scene/script. Those re-activations are instant (transition 0); only the
         regular handover (sleep mode turning on, or entering the regime) uses
-        `sleep_mode_scene_transition`.
+        `sleep_mode_scene_transition`. When a light turns on, only that light
+        (`lights`) gets its settings from the scene, so lights that are off stay
+        off and each light gets a single command.
         """
         if self._sleep_mode_scene is None:
             self._sleep_scene_active = False
@@ -1663,6 +1670,10 @@ class AdaptiveSwitch(SwitchEntity, RestoreEntity):
         instant = (triggered_by_service or triggered_by_light_on) and (
             not triggered_by_own_scene
         )
+        # Only the light(s) that turned on; a takeover re-applies the whole scene.
+        only_lights = (
+            lights if triggered_by_light_on and not triggered_by_service else None
+        )
         if self.sleep_mode_switch.is_on:
             # Manual sleep mode: the toggle handler (re)fires the scene.
             self._sleep_scene_active = False
@@ -1675,7 +1686,11 @@ class AdaptiveSwitch(SwitchEntity, RestoreEntity):
                     triggered_by_light_on,
                     triggered_by_service,
                 )
-                await self._activate_sleep_mode_scene(context, transition=0)
+                await self._activate_sleep_mode_scene(
+                    context,
+                    transition=0,
+                    lights=only_lights,
+                )
             return True
         if not self._in_transition_until_sleep_scene_regime():
             self._sleep_scene_active = False
@@ -1696,6 +1711,8 @@ class AdaptiveSwitch(SwitchEntity, RestoreEntity):
             await self._activate_sleep_mode_scene(
                 context,
                 transition=0 if instant else None,
+                # Entering the regime applies the whole scene.
+                lights=only_lights if instant and not entering else None,
             )
         return True
 
@@ -1736,7 +1753,7 @@ class AdaptiveSwitch(SwitchEntity, RestoreEntity):
         # Hand over to a sleep-mode scene/script when applicable (manual sleep or
         # the transition_until_sleep regime), or skip when `only_once` is set and
         # this isn't a forced adaptation.
-        if await self._maybe_handle_sleep_scene(context) or (
+        if await self._maybe_handle_sleep_scene(context, lights) or (
             not force and self._only_once
         ):
             return
@@ -1959,10 +1976,28 @@ class AdaptiveSwitch(SwitchEntity, RestoreEntity):
 
         self._sleep_mode_scene_task = self.hass.async_create_task(_delayed_activate())
 
+    def _sleep_scene_states_for(self, lights: list[str]) -> list[State] | None:
+        """Get the `sleep_mode_scene`'s stored states of `lights`, if possible.
+
+        Only works for scenes defined in Home Assistant (`scenes.yaml`/UI), which
+        keep their target states. Returns None when the states are not available
+        or none of the lights are part of the scene.
+        """
+        assert self._sleep_mode_scene is not None
+        component = self.hass.data.get("scene")
+        get_entity = getattr(component, "get_entity", None)
+        entity = get_entity(self._sleep_mode_scene) if get_entity else None
+        states = getattr(getattr(entity, "scene_config", None), "states", None)
+        if not states:
+            return None
+        selected = [states[light] for light in lights if light in states]
+        return selected or None
+
     async def _activate_sleep_mode_scene(
         self,
         context: Context,
         transition: float | None = None,
+        lights: list[str] | None = None,
     ) -> None:
         """Activate the configured sleep-mode scene or run the script.
 
@@ -1970,10 +2005,35 @@ class AdaptiveSwitch(SwitchEntity, RestoreEntity):
         does not intercept or re-adapt the resulting `light.turn_on` calls, and
         (b) the off→on events the scene causes can be recognized as our own and
         do not re-trigger the scene (see `_maybe_handle_sleep_scene`).
+
+        With `lights`, only those lights are set to their state in the scene
+        (when the scene's states are available); otherwise the whole scene is
+        activated.
         """
         assert self._sleep_mode_scene is not None
         entity_id = self._sleep_mode_scene
         domain = entity_id.split(".", 1)[0]
+        if lights and domain == "scene":
+            states = self._sleep_scene_states_for(lights)
+            if states is not None:
+                _LOGGER.debug(
+                    "%s: Applying scene '%s' to %s only (transition=%s)",
+                    self._name,
+                    entity_id,
+                    [state.entity_id for state in states],
+                    transition,
+                )
+                await async_reproduce_state(
+                    self.hass,
+                    states,
+                    context=self.create_context("scene", parent=context),
+                    reproduce_options=(
+                        {ATTR_TRANSITION: transition}
+                        if transition is not None
+                        else None
+                    ),
+                )
+                return
         service_data: dict[str, Any] = {ATTR_ENTITY_ID: entity_id}
         # `scene.turn_on` supports a `transition`; `script.turn_on` does not, so
         # only add it for scenes (and only when set, to preserve #378's behavior).
