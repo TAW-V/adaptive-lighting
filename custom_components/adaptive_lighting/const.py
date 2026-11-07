@@ -159,7 +159,10 @@ DOCS[CONF_SLEEP_MODE_SCENE] = (
     "on during it (not on every interval, so manual changes are preserved), "
     "instead of gradually easing the lights toward the sleep values. While "
     "active, Adaptive Lighting stops adapting the lights and lets the "
-    "scene/script control them. Leave empty to keep the default behavior. 🎬😴"
+    "scene/script control them. It never turns on lights that are off: a scene "
+    "is only applied to the lights that are on (for scenes defined in Home "
+    "Assistant), and a script is skipped when all lights are off. Leave empty "
+    "to keep the default behavior. 🎬😴"
 )
 
 CONF_SLEEP_MODE_SCENE_TRANSITION, DEFAULT_SLEEP_MODE_SCENE_TRANSITION = (

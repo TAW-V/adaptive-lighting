@@ -1204,6 +1204,160 @@ async def test_sleep_mode_scene_reapplied_per_light(hass):
     assert hass.states.get(ENTITY_LIGHT_2).state == STATE_OFF
 
 
+async def _setup_bedtime_scene(hass):
+    """Set up a Home Assistant `scene.bedtime` for lights 1 and 2."""
+    assert await async_setup_component(
+        hass,
+        "scene",
+        {
+            "scene": [
+                {
+                    "name": "bedtime",
+                    "entities": {
+                        ENTITY_LIGHT_1: {"state": "on", ATTR_BRIGHTNESS: 10},
+                        ENTITY_LIGHT_2: {"state": "on", ATTR_BRIGHTNESS: 20},
+                    },
+                },
+            ],
+        },
+    )
+    await hass.async_block_till_done()
+
+
+async def _turn_lights(hass, service, lights):
+    for light in lights:
+        await hass.services.async_call(
+            LIGHT_DOMAIN,
+            service,
+            {ATTR_ENTITY_ID: light},
+            blocking=True,
+        )
+    await hass.async_block_till_done()
+
+
+async def test_sleep_mode_scene_only_applied_to_lights_that_are_on(hass):
+    """Sleep mode applies the scene to the lights that are on; others stay off."""
+    switch, _ = await setup_lights_and_switch(
+        hass,
+        {CONF_SLEEP_MODE_SCENE: "scene.bedtime", CONF_SLEEP_TRANSITION: 0},
+    )
+    await _setup_bedtime_scene(hass)
+    await _turn_lights(hass, SERVICE_TURN_ON, [ENTITY_LIGHT_1])
+    await _turn_lights(hass, SERVICE_TURN_OFF, [ENTITY_LIGHT_2])
+
+    await hass.services.async_call(
+        SWITCH_DOMAIN,
+        SERVICE_TURN_ON,
+        {ATTR_ENTITY_ID: switch.sleep_mode_switch.entity_id},
+        blocking=True,
+    )
+    await hass.async_block_till_done()
+
+    assert hass.states.get(ENTITY_LIGHT_1).attributes[ATTR_BRIGHTNESS] == 10
+    assert hass.states.get(ENTITY_LIGHT_2).state == STATE_OFF
+
+    # Resetting manual control (a takeover) doesn't turn on the off light either.
+    await hass.services.async_call(
+        DOMAIN,
+        SERVICE_SET_MANUAL_CONTROL,
+        {ATTR_ENTITY_ID: switch.entity_id, CONF_MANUAL_CONTROL: False},
+        blocking=True,
+    )
+    await hass.async_block_till_done()
+    assert hass.states.get(ENTITY_LIGHT_2).state == STATE_OFF
+
+
+async def test_sleep_mode_scene_not_applied_when_all_lights_off(hass):
+    """Entering the regime with all lights off turns nothing on.
+
+    A light turning on later still gets its state from the scene.
+    """
+    switch, _ = await _setup_lights_and_switch_at_daytime(
+        hass,
+        {CONF_SLEEP_MODE_SCENE: "scene.bedtime", CONF_ADAPT_UNTIL_SLEEP: True},
+    )
+    await _setup_bedtime_scene(hass)
+    await _turn_lights(hass, SERVICE_TURN_OFF, [ENTITY_LIGHT_1, ENTITY_LIGHT_2])
+
+    sunset = SUNSET.replace(tzinfo=dt_util.DEFAULT_TIME_ZONE).astimezone(dt_util.UTC)
+    after_sunset = sunset + datetime.timedelta(hours=1)
+    with patch(
+        "homeassistant.components.adaptive_lighting.color_and_brightness.utcnow",
+        return_value=after_sunset,
+    ):
+        await switch._update_attrs_and_maybe_adapt_lights(
+            context=switch.create_context("interval"),
+            transition=0,
+            force=False,
+        )
+        await hass.async_block_till_done()
+        assert switch._sleep_scene_active
+        assert hass.states.get(ENTITY_LIGHT_1).state == STATE_OFF
+        assert hass.states.get(ENTITY_LIGHT_2).state == STATE_OFF
+
+        await _turn_lights(hass, SERVICE_TURN_ON, [ENTITY_LIGHT_1])
+        assert hass.states.get(ENTITY_LIGHT_1).attributes[ATTR_BRIGHTNESS] == 10
+        assert hass.states.get(ENTITY_LIGHT_2).state == STATE_OFF
+
+
+async def test_sleep_mode_scene_without_switch_lights_applied_whole(hass):
+    """A scene that contains none of the switch's lights is activated as a whole.
+
+    E.g. a scene of the members of a light group that can't be expanded.
+    """
+    switch, _ = await setup_lights_and_switch(
+        hass,
+        {CONF_SLEEP_MODE_SCENE: "scene.members", CONF_SLEEP_TRANSITION: 0},
+    )
+    assert await async_setup_component(
+        hass,
+        "scene",
+        {
+            "scene": [
+                {
+                    "name": "members",
+                    "entities": {ENTITY_LIGHT_3: {"state": "on", ATTR_BRIGHTNESS: 30}},
+                },
+            ],
+        },
+    )
+    await hass.async_block_till_done()
+    await _turn_lights(hass, SERVICE_TURN_ON, [ENTITY_LIGHT_1])
+    await _turn_lights(hass, SERVICE_TURN_OFF, [ENTITY_LIGHT_2, ENTITY_LIGHT_3])
+
+    await hass.services.async_call(
+        SWITCH_DOMAIN,
+        SERVICE_TURN_ON,
+        {ATTR_ENTITY_ID: switch.sleep_mode_switch.entity_id},
+        blocking=True,
+    )
+    await hass.async_block_till_done()
+    assert hass.states.get(ENTITY_LIGHT_3).state == STATE_ON
+
+
+async def test_sleep_mode_script_skipped_when_all_lights_off(hass):
+    """A script (which can't be limited to some lights) is skipped if all are off."""
+    script_calls = async_mock_service(hass, "script", SERVICE_TURN_ON)
+    switch, _ = await setup_lights_and_switch(
+        hass,
+        {CONF_SLEEP_MODE_SCENE: "script.bedtime", CONF_SLEEP_TRANSITION: 0},
+    )
+    await _turn_lights(hass, SERVICE_TURN_OFF, switch.lights)
+
+    await hass.services.async_call(
+        SWITCH_DOMAIN,
+        SERVICE_TURN_ON,
+        {ATTR_ENTITY_ID: switch.sleep_mode_switch.entity_id},
+        blocking=True,
+    )
+    await hass.async_block_till_done()
+    assert len(script_calls) == 0
+
+    # Once a light turns on, the script runs.
+    await _turn_lights(hass, SERVICE_TURN_ON, [ENTITY_LIGHT_1])
+    assert len(script_calls) == 1
+
+
 async def test_sleep_mode_scene_transition_ignored_for_script(hass):
     """The transition is not passed to `script.turn_on` (scripts don't accept it)."""
     script_calls = async_mock_service(hass, "script", SERVICE_TURN_ON)
