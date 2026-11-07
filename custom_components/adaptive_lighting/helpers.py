@@ -7,6 +7,8 @@ import math
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
+    from collections.abc import Mapping
+
     from homeassistant.core import HomeAssistant
 
 
@@ -96,3 +98,90 @@ def get_friendly_name(hass: HomeAssistant, entity_id: str) -> str:
         attributes: dict[str, Any] = dict(getattr(state, "attributes", {}))
         return attributes.get("friendly_name", entity_id)
     return entity_id
+
+
+# Tolerances used to decide whether a light reports its state in a scene.
+SCENE_BRIGHTNESS_TOLERANCE = 3  # of 255
+SCENE_XY_TOLERANCE = 0.01
+SCENE_HUE_TOLERANCE = 3.0  # degrees
+SCENE_SATURATION_TOLERANCE = 3.0  # percent
+SCENE_MIRED_TOLERANCE = 5.0
+SCENE_RGB_TOLERANCE = 5  # per channel
+
+# Scene color mode -> (state attribute, comparison kind).
+_SCENE_COLOR_ATTRIBUTES: dict[str, tuple[str, str]] = {
+    "xy": ("xy_color", "xy"),
+    "hs": ("hs_color", "hs"),
+    "color_temp": ("color_temp_kelvin", "kelvin"),
+    "rgb": ("rgb_color", "rgb"),
+    "rgbw": ("rgbw_color", "rgb"),
+    "rgbww": ("rgbww_color", "rgb"),
+}
+# Without a color mode, the first color that is set is used (like a scene does).
+_SCENE_COLOR_FALLBACK_ORDER = ("hs", "color_temp", "rgb", "rgbw", "rgbww", "xy")
+
+
+def _color_matches(kind: str, current: Any, target: Any) -> bool:
+    if current is None:
+        return False
+    try:
+        if kind == "xy":
+            return all(
+                abs(c - t) <= SCENE_XY_TOLERANCE
+                for c, t in zip(current, target, strict=True)
+            )
+        if kind == "hs":
+            hue_diff = abs(current[0] - target[0]) % 360
+            hue_diff = min(hue_diff, 360 - hue_diff)
+            return (
+                hue_diff <= SCENE_HUE_TOLERANCE
+                and abs(current[1] - target[1]) <= SCENE_SATURATION_TOLERANCE
+            )
+        if kind == "kelvin":
+            return (
+                abs(1_000_000 / current - 1_000_000 / target) <= SCENE_MIRED_TOLERANCE
+            )
+        return all(
+            abs(c - t) <= SCENE_RGB_TOLERANCE
+            for c, t in zip(current, target, strict=True)
+        )
+    except (TypeError, ValueError, ZeroDivisionError):
+        return False
+
+
+def scene_state_matches(
+    current_state: str,
+    current_attributes: Mapping[str, Any],
+    target_state: str,
+    target_attributes: Mapping[str, Any],
+) -> bool:
+    """Whether a light's reported state matches its (stored) state in a scene.
+
+    Compares on/off, brightness and the scene's color (in the scene's color
+    mode), with small tolerances for rounding by the light or integration.
+    """
+    if current_state != target_state:
+        return False
+    if target_state != "on":
+        return True
+    target_brightness = target_attributes.get("brightness")
+    if target_brightness is not None:
+        current_brightness = current_attributes.get("brightness")
+        if (
+            current_brightness is None
+            or abs(current_brightness - target_brightness) > SCENE_BRIGHTNESS_TOLERANCE
+        ):
+            return False
+    color_mode = target_attributes.get("color_mode")
+    if color_mode in _SCENE_COLOR_ATTRIBUTES:
+        modes = (color_mode,)
+    elif color_mode in (None, "unknown"):
+        modes = _SCENE_COLOR_FALLBACK_ORDER
+    else:  # onoff, brightness, white: no color to compare
+        return True
+    for mode in modes:
+        attribute, kind = _SCENE_COLOR_ATTRIBUTES[mode]
+        target = target_attributes.get(attribute)
+        if target is not None:
+            return _color_matches(kind, current_attributes.get(attribute), target)
+    return True

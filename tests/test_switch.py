@@ -59,6 +59,8 @@ from homeassistant.components.adaptive_lighting.const import (
     CONF_SKIP_REDUNDANT_COMMANDS,
     CONF_SLEEP_MODE_SCENE,
     CONF_SLEEP_MODE_SCENE_TRANSITION,
+    CONF_SLEEP_MODE_SCENE_VERIFY_DELAY,
+    CONF_SLEEP_MODE_SCENE_VERIFY_RETRIES,
     CONF_SLEEP_RGB_OR_COLOR_TEMP,
     CONF_SLEEP_TRANSITION,
     CONF_SUNRISE_OFFSET,
@@ -133,7 +135,14 @@ from homeassistant.const import (
     STATE_UNAVAILABLE,
     EntityCategory,
 )
-from homeassistant.core import Context, CoreState, Event, HomeAssistant, State
+from homeassistant.core import (
+    Context,
+    CoreState,
+    Event,
+    HomeAssistant,
+    State,
+    callback,
+)
 from homeassistant.exceptions import Unauthorized
 from homeassistant.helpers import area_registry as ar
 from homeassistant.helpers import entity_registry
@@ -1380,6 +1389,453 @@ async def test_sleep_mode_scene_transition_ignored_for_script(hass):
     assert len(script_calls) == 1
     assert script_calls[0].data[ATTR_ENTITY_ID] == "script.bedtime"
     assert ATTR_TRANSITION not in script_calls[0].data
+
+
+def _record_scene_light_calls(hass):
+    """Record the `light.turn_on` calls Adaptive Lighting makes for a scene."""
+    calls: list[dict[str, Any]] = []
+
+    @callback
+    def _listener(event: Event) -> None:
+        if (
+            event.data.get("domain") == LIGHT_DOMAIN
+            and event.data.get("service") == SERVICE_TURN_ON
+            and is_our_context(event.context, "scene")
+        ):
+            calls.append(dict(event.data[ATTR_SERVICE_DATA]))
+
+    hass.bus.async_listen(EVENT_CALL_SERVICE, _listener)
+    return calls
+
+
+def _calls_for(calls, light):
+    return [
+        call
+        for call in calls
+        if light
+        in (
+            call[ATTR_ENTITY_ID]
+            if isinstance(call[ATTR_ENTITY_ID], list)
+            else [call[ATTR_ENTITY_ID]]
+        )
+    ]
+
+
+def _report_brightness(hass, light, brightness):
+    """Simulate a light reporting a brightness (e.g. after a lost Zigbee message)."""
+    state = hass.states.get(light)
+    hass.states.async_set(
+        light,
+        state.state,
+        {**state.attributes, ATTR_BRIGHTNESS: brightness},
+    )
+
+
+async def _enter_sleep_scene(hass, extra_config=None):
+    """Both lights on, `scene.bedtime` (10/20) applied via sleep mode."""
+    switch, _ = await setup_lights_and_switch(
+        hass,
+        {
+            CONF_SLEEP_MODE_SCENE: "scene.bedtime",
+            CONF_SLEEP_MODE_SCENE_TRANSITION: 7,
+            CONF_SLEEP_TRANSITION: 0,
+            **(extra_config or {}),
+        },
+    )
+    await _setup_bedtime_scene(hass)
+    await _turn_lights(hass, SERVICE_TURN_ON, [ENTITY_LIGHT_1, ENTITY_LIGHT_2])
+    await hass.services.async_call(
+        SWITCH_DOMAIN,
+        SERVICE_TURN_ON,
+        {ATTR_ENTITY_ID: switch.sleep_mode_switch.entity_id},
+        blocking=True,
+    )
+    await hass.async_block_till_done()
+    assert hass.states.get(ENTITY_LIGHT_1).attributes[ATTR_BRIGHTNESS] == 10
+    assert hass.states.get(ENTITY_LIGHT_2).attributes[ATTR_BRIGHTNESS] == 20
+    return switch
+
+
+async def test_sleep_mode_scene_off_light_turned_on_gets_scene_instantly(hass):
+    """A light that was off and is turned on gets its scene state with transition 0.
+
+    Not with `sleep_mode_scene_transition`, which is only for the handover.
+    """
+    switch = await _enter_sleep_scene(
+        hass,
+        {CONF_SLEEP_MODE_SCENE_VERIFY_RETRIES: 0},
+    )
+    calls = _record_scene_light_calls(hass)
+    await _turn_lights(hass, SERVICE_TURN_OFF, [ENTITY_LIGHT_2])
+    _report_brightness(hass, ENTITY_LIGHT_2, 138)  # the bulb's own memory
+    await _turn_lights(hass, SERVICE_TURN_ON, [ENTITY_LIGHT_2])
+
+    assert hass.states.get(ENTITY_LIGHT_2).attributes[ATTR_BRIGHTNESS] == 20
+    light_2_calls = _calls_for(calls, ENTITY_LIGHT_2)
+    assert len(light_2_calls) == 1
+    assert light_2_calls[0][ATTR_TRANSITION] == 0
+    assert light_2_calls[0][ATTR_BRIGHTNESS] == 20
+    assert not _calls_for(calls, ENTITY_LIGHT_1)
+    assert switch.sleep_mode_switch.is_on
+
+
+async def test_sleep_mode_scene_bare_turn_on_of_matching_light_sends_nothing(hass):
+    """A bare `light.turn_on` of lights that already match the scene is a no-op."""
+    await _enter_sleep_scene(hass, {CONF_SLEEP_MODE_SCENE_VERIFY_RETRIES: 0})
+    calls = _record_scene_light_calls(hass)
+    # Within the tolerance (±3 of 255) still counts as matching.
+    _report_brightness(hass, ENTITY_LIGHT_2, 22)
+
+    await hass.services.async_call(
+        LIGHT_DOMAIN,
+        SERVICE_TURN_ON,
+        {ATTR_ENTITY_ID: [ENTITY_LIGHT_1, ENTITY_LIGHT_2]},
+        blocking=True,
+    )
+    await hass.async_block_till_done()
+    assert calls == []
+
+
+async def test_sleep_mode_scene_reapplied_only_to_mismatching_lights(hass):
+    """Lights that are on but don't match are re-sent their state (transition 0).
+
+    Both for a bare `light.turn_on` and for a takeover (`set_manual_control`).
+    """
+    switch = await _enter_sleep_scene(
+        hass,
+        {CONF_SLEEP_MODE_SCENE_VERIFY_RETRIES: 0},
+    )
+    calls = _record_scene_light_calls(hass)
+
+    # A lost Zigbee message: light 2 still reports its old brightness.
+    _report_brightness(hass, ENTITY_LIGHT_2, 138)
+    await hass.services.async_call(
+        LIGHT_DOMAIN,
+        SERVICE_TURN_ON,
+        {ATTR_ENTITY_ID: [ENTITY_LIGHT_1, ENTITY_LIGHT_2]},
+        blocking=True,
+    )
+    await hass.async_block_till_done()
+    assert not _calls_for(calls, ENTITY_LIGHT_1)
+    assert len(_calls_for(calls, ENTITY_LIGHT_2)) == 1
+    assert calls[-1][ATTR_TRANSITION] == 0
+    assert calls[-1][ATTR_BRIGHTNESS] == 20
+    assert hass.states.get(ENTITY_LIGHT_2).attributes[ATTR_BRIGHTNESS] == 20
+    assert not switch.manager.manual_control.get(ENTITY_LIGHT_2)
+
+    # A takeover does the same.
+    calls.clear()
+    _report_brightness(hass, ENTITY_LIGHT_1, 138)
+    await hass.services.async_call(
+        DOMAIN,
+        SERVICE_SET_MANUAL_CONTROL,
+        {ATTR_ENTITY_ID: switch.entity_id, CONF_MANUAL_CONTROL: False},
+        blocking=True,
+    )
+    await hass.async_block_till_done()
+    assert len(_calls_for(calls, ENTITY_LIGHT_1)) == 1
+    assert not _calls_for(calls, ENTITY_LIGHT_2)
+    assert calls[-1][ATTR_TRANSITION] == 0
+    assert hass.states.get(ENTITY_LIGHT_1).attributes[ATTR_BRIGHTNESS] == 10
+
+    # A takeover with everything matching sends nothing.
+    calls.clear()
+    await hass.services.async_call(
+        DOMAIN,
+        SERVICE_SET_MANUAL_CONTROL,
+        {ATTR_ENTITY_ID: switch.entity_id, CONF_MANUAL_CONTROL: False},
+        blocking=True,
+    )
+    await hass.async_block_till_done()
+    assert calls == []
+
+
+async def test_sleep_mode_scene_regime_bare_turn_on_reapplies_mismatching(hass):
+    """In the transition_until_sleep regime, a bare turn_on fixes a stale light."""
+    switch, _ = await _setup_lights_and_switch_at_daytime(
+        hass,
+        {
+            CONF_SLEEP_MODE_SCENE: "scene.bedtime",
+            CONF_ADAPT_UNTIL_SLEEP: True,
+            CONF_SLEEP_MODE_SCENE_VERIFY_RETRIES: 0,
+        },
+    )
+    await _setup_bedtime_scene(hass)
+    await _turn_lights(hass, SERVICE_TURN_ON, [ENTITY_LIGHT_1, ENTITY_LIGHT_2])
+    sunset = SUNSET.replace(tzinfo=dt_util.DEFAULT_TIME_ZONE).astimezone(dt_util.UTC)
+    with patch(
+        "homeassistant.components.adaptive_lighting.color_and_brightness.utcnow",
+        return_value=sunset + datetime.timedelta(hours=1),
+    ):
+        await switch._update_attrs_and_maybe_adapt_lights(
+            context=switch.create_context("interval"),
+            transition=0,
+            force=False,
+        )
+        await hass.async_block_till_done()
+        assert switch._sleep_scene_active
+        assert hass.states.get(ENTITY_LIGHT_2).attributes[ATTR_BRIGHTNESS] == 20
+
+        calls = _record_scene_light_calls(hass)
+        _report_brightness(hass, ENTITY_LIGHT_2, 138)
+        await _turn_lights(hass, SERVICE_TURN_ON, [ENTITY_LIGHT_1, ENTITY_LIGHT_2])
+    assert not _calls_for(calls, ENTITY_LIGHT_1)
+    assert len(_calls_for(calls, ENTITY_LIGHT_2)) == 1
+    assert calls[-1][ATTR_TRANSITION] == 0
+    assert hass.states.get(ENTITY_LIGHT_2).attributes[ATTR_BRIGHTNESS] == 20
+
+
+class _VerifySleeps:
+    """Pause the scene check's `asyncio.sleep` so a test can act in between."""
+
+    def __init__(self, delays):
+        self.delays = set(delays)
+        self.recorded: list[float] = []
+        self.inside = asyncio.Event()
+        self.release = asyncio.Event()
+        self._real_sleep = asyncio.sleep
+
+    async def __call__(self, seconds, *args, **kwargs):
+        if seconds not in self.delays:
+            return await self._real_sleep(seconds, *args, **kwargs)
+        self.recorded.append(seconds)
+        self.inside.set()
+        await self.release.wait()
+        self.release.clear()
+        return None
+
+    async def next_check(self):
+        """Wait until the check is sleeping, then return."""
+        await asyncio.wait_for(self.inside.wait(), timeout=2)
+        self.inside.clear()
+
+    def patch(self):
+        return patch(
+            "homeassistant.components.adaptive_lighting.switch.asyncio.sleep",
+            self,
+        )
+
+
+async def test_sleep_mode_scene_verify_and_retry(hass, caplog):
+    """After the scene, lights that don't report it are re-sent it (max retries)."""
+    sleeps = _VerifySleeps({7 + 5, 5})
+    with sleeps.patch():
+        switch = await _enter_sleep_scene(
+            hass,
+            {
+                CONF_SLEEP_MODE_SCENE_VERIFY_RETRIES: 2,
+                CONF_SLEEP_MODE_SCENE_VERIFY_DELAY: 5,
+            },
+        )
+        calls = _record_scene_light_calls(hass)
+        # The check waits for the transition (7 s) plus the delay (5 s).
+        await sleeps.next_check()
+        assert sleeps.recorded == [12]
+        for attempt in range(3):
+            # Light 2 keeps missing the command.
+            _report_brightness(hass, ENTITY_LIGHT_2, 138)
+            sleeps.release.set()
+            if attempt < 2:
+                await sleeps.next_check()
+        tasks = [batch.task for batch in switch._scene_verify_batches]
+        await asyncio.gather(*tasks)
+        await hass.async_block_till_done()
+
+    assert sleeps.recorded == [12, 5, 5]
+    assert not _calls_for(calls, ENTITY_LIGHT_1)
+    light_2_calls = _calls_for(calls, ENTITY_LIGHT_2)
+    assert len(light_2_calls) == 2  # the maximum number of re-sends
+    assert all(call[ATTR_TRANSITION] == 0 for call in light_2_calls)
+    assert all(call[ATTR_BRIGHTNESS] == 20 for call in light_2_calls)
+    assert "still don't match 'sleep_mode_scene'" in caplog.text
+    assert not switch._scene_verify_batches
+    # The re-sends are ours, so they don't count as manual control.
+    assert not switch.manager.manual_control.get(ENTITY_LIGHT_2)
+
+
+async def test_sleep_mode_scene_verify_succeeds_after_retry(hass, caplog):
+    """A re-send that arrives stops the checks without a warning."""
+    sleeps = _VerifySleeps({7 + 5, 5})
+    with sleeps.patch():
+        switch = await _enter_sleep_scene(
+            hass,
+            {CONF_SLEEP_MODE_SCENE_VERIFY_DELAY: 5},
+        )
+        calls = _record_scene_light_calls(hass)
+        await sleeps.next_check()
+        _report_brightness(hass, ENTITY_LIGHT_2, 138)
+        sleeps.release.set()
+        await sleeps.next_check()  # the re-send arrived (template light)
+        sleeps.release.set()
+        tasks = [batch.task for batch in switch._scene_verify_batches]
+        await asyncio.gather(*tasks)
+        await hass.async_block_till_done()
+
+    assert len(_calls_for(calls, ENTITY_LIGHT_2)) == 1
+    assert hass.states.get(ENTITY_LIGHT_2).attributes[ATTR_BRIGHTNESS] == 20
+    assert "still don't match" not in caplog.text
+
+
+@pytest.mark.parametrize("change", ["turn_off", "manual", "sleep_off"])
+async def test_sleep_mode_scene_verify_cancelled(hass, change):
+    """The check doesn't fight the user: a turn-off or manual change cancels it."""
+    sleeps = _VerifySleeps({7 + 5, 5})
+    with sleeps.patch():
+        switch = await _enter_sleep_scene(
+            hass,
+            {CONF_SLEEP_MODE_SCENE_VERIFY_DELAY: 5},
+        )
+        calls = _record_scene_light_calls(hass)
+        await sleeps.next_check()
+        tasks = [batch.task for batch in switch._scene_verify_batches]
+        if change == "turn_off":
+            await _turn_lights(hass, SERVICE_TURN_OFF, [ENTITY_LIGHT_2])
+        elif change == "manual":
+            await hass.services.async_call(
+                LIGHT_DOMAIN,
+                SERVICE_TURN_ON,
+                {ATTR_ENTITY_ID: ENTITY_LIGHT_2, ATTR_BRIGHTNESS: 200},
+                blocking=True,
+            )
+            await hass.async_block_till_done()
+            _report_brightness(hass, ENTITY_LIGHT_2, 138)
+        else:
+            await hass.services.async_call(
+                SWITCH_DOMAIN,
+                SERVICE_TURN_OFF,
+                {ATTR_ENTITY_ID: switch.sleep_mode_switch.entity_id},
+                blocking=True,
+            )
+            await hass.async_block_till_done()
+        sleeps.release.set()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        await hass.async_block_till_done()
+
+    assert not _calls_for(calls, ENTITY_LIGHT_2)
+    assert not switch._scene_verify_batches
+    if change == "turn_off":
+        assert hass.states.get(ENTITY_LIGHT_2).state == STATE_OFF
+
+
+async def test_sleep_mode_scene_targets_group_members(hass):
+    """A light group that is not in the scene maps to its members' scene states.
+
+    E.g. a Zigbee2MQTT group (`group_entities`), which Adaptive Lighting can't
+    expand, with a scene of its member lamps.
+    """
+    switch, _ = await setup_lights_and_switch(
+        hass,
+        {CONF_SLEEP_MODE_SCENE: "scene.bedtime", CONF_SLEEP_TRANSITION: 0},
+    )
+    await _setup_bedtime_scene(hass)
+    hass.states.async_set(
+        "light.z2m_group",
+        STATE_ON,
+        {"group_entities": [ENTITY_LIGHT_1, ENTITY_LIGHT_2]},
+    )
+    scene_states = switch._sleep_scene_states()
+    targets = switch._scene_targets(scene_states, ["light.z2m_group", ENTITY_LIGHT_3])
+    assert list(targets) == ["light.z2m_group"]
+    assert [state.entity_id for state in targets["light.z2m_group"]] == [
+        ENTITY_LIGHT_1,
+        ENTITY_LIGHT_2,
+    ]
+
+
+async def _setup_group_sleep_scene(hass, extra_config=None):
+    """A switch with an unexpanded light group and a scene of its members."""
+    await setup_lights(hass, with_group=True)
+    _, switch = await setup_switch(
+        hass,
+        {
+            CONF_LIGHTS: ["light.light_group"],
+            CONF_EXPAND_LIGHT_GROUPS: False,
+            CONF_INTERCEPT: True,
+            CONF_SLEEP_MODE_SCENE: "scene.members",
+            CONF_SLEEP_MODE_SCENE_TRANSITION: 7,
+            CONF_SLEEP_TRANSITION: 0,
+            CONF_SUNRISE_TIME: datetime.time(SUNRISE.hour),
+            CONF_SUNSET_TIME: datetime.time(SUNSET.hour),
+            **(extra_config or {}),
+        },
+    )
+    assert switch.lights == ["light.light_group"]
+    assert await async_setup_component(
+        hass,
+        "scene",
+        {
+            "scene": [
+                {
+                    "name": "members",
+                    "entities": {
+                        "light.light_4": {"state": "on", ATTR_BRIGHTNESS: 10},
+                        "light.light_5": {"state": "on", ATTR_BRIGHTNESS: 20},
+                    },
+                },
+            ],
+        },
+    )
+    await _turn_lights(hass, SERVICE_TURN_ON, ["light.light_group"])
+    await hass.services.async_call(
+        SWITCH_DOMAIN,
+        SERVICE_TURN_ON,
+        {ATTR_ENTITY_ID: switch.sleep_mode_switch.entity_id},
+        blocking=True,
+    )
+    await hass.async_block_till_done()
+    assert hass.states.get("light.light_4").attributes[ATTR_BRIGHTNESS] == 10
+    assert hass.states.get("light.light_5").attributes[ATTR_BRIGHTNESS] == 20
+    return switch
+
+
+async def test_sleep_mode_scene_group_reapplied_to_mismatching_members(hass):
+    """A bare `light.turn_on` of a group compares and re-sends per member."""
+    await _setup_group_sleep_scene(hass, {CONF_SLEEP_MODE_SCENE_VERIFY_RETRIES: 0})
+    calls = _record_scene_light_calls(hass)
+
+    await _turn_lights(hass, SERVICE_TURN_ON, ["light.light_group"])
+    assert calls == []
+
+    _report_brightness(hass, "light.light_5", 138)
+    await _turn_lights(hass, SERVICE_TURN_ON, ["light.light_group"])
+    assert not _calls_for(calls, "light.light_4")
+    assert len(_calls_for(calls, "light.light_5")) == 1
+    assert calls[-1][ATTR_TRANSITION] == 0
+    assert hass.states.get("light.light_5").attributes[ATTR_BRIGHTNESS] == 20
+
+
+async def test_sleep_mode_scene_verify_cancelled_by_member_change(hass):
+    """Changing a group member directly cancels its check (no fighting the user)."""
+    sleeps = _VerifySleeps({7 + 5, 5})
+    with sleeps.patch():
+        switch = await _setup_group_sleep_scene(
+            hass,
+            {CONF_SLEEP_MODE_SCENE_VERIFY_DELAY: 5},
+        )
+        calls = _record_scene_light_calls(hass)
+        await sleeps.next_check()
+        tasks = [batch.task for batch in switch._scene_verify_batches]
+        assert {
+            target for batch in switch._scene_verify_batches for target in batch.targets
+        } == {"light.light_4", "light.light_5"}
+        await hass.services.async_call(
+            LIGHT_DOMAIN,
+            SERVICE_TURN_ON,
+            {ATTR_ENTITY_ID: "light.light_5", ATTR_BRIGHTNESS: 200},
+            blocking=True,
+        )
+        await hass.async_block_till_done()
+        # Light 4 missed the scene, light 5 was changed by the user.
+        _report_brightness(hass, "light.light_4", 138)
+        sleeps.release.set()
+        await sleeps.next_check()
+        sleeps.release.set()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        await hass.async_block_till_done()
+
+    assert len(_calls_for(calls, "light.light_4")) == 1
+    assert not _calls_for(calls, "light.light_5")
+    assert hass.states.get("light.light_5").attributes[ATTR_BRIGHTNESS] == 200
 
 
 async def test_manager_not_tracking_untracked_lights(hass):

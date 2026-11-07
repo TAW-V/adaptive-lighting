@@ -133,6 +133,8 @@ from .const import (
     CONF_SLEEP_COLOR_TEMP,
     CONF_SLEEP_MODE_SCENE,
     CONF_SLEEP_MODE_SCENE_TRANSITION,
+    CONF_SLEEP_MODE_SCENE_VERIFY_DELAY,
+    CONF_SLEEP_MODE_SCENE_VERIFY_RETRIES,
     CONF_SLEEP_RGB_COLOR,
     CONF_SLEEP_RGB_OR_COLOR_TEMP,
     CONF_SLEEP_TRANSITION,
@@ -166,6 +168,7 @@ from .helpers import (
     color_difference_redmean,
     int_to_base36,
     remove_vowels,
+    scene_state_matches,
     short_hash,
 )
 
@@ -682,6 +685,52 @@ def _is_light_group(state: State) -> bool:
     )
 
 
+def _light_group_members(hass: HomeAssistant, light: str) -> list[str]:
+    """Members of a light group (HA `entity_id` or Zigbee2MQTT `group_entities`)."""
+    state = hass.states.get(light)
+    if state is None:
+        return []
+    for attribute in ("entity_id", "group_entities"):
+        members = state.attributes.get(attribute)
+        if isinstance(members, list | tuple):
+            return [m for m in members if isinstance(m, str)]
+    return []
+
+
+def _scene_relevant_attributes(state: State | None) -> dict[str, Any]:
+    """The attributes of a light's state that are compared with a scene."""
+    if state is None:
+        return {}
+    return {
+        "state": state.state,
+        **{
+            key: state.attributes.get(key)
+            for key in (
+                "brightness",
+                "color_mode",
+                "xy_color",
+                "hs_color",
+                "color_temp_kelvin",
+            )
+            if state.attributes.get(key) is not None
+        },
+    }
+
+
+class _SceneVerifyBatch:
+    """Lights whose scene state is checked after an apply (see `AdaptiveSwitch`)."""
+
+    def __init__(
+        self,
+        targets: dict[str, tuple[State, str]],
+        context: Context,
+    ) -> None:
+        # target entity_id -> (state in the scene, switch light that owns it)
+        self.targets = targets
+        self.context = context
+        self.task: asyncio.Task[None] | None = None
+
+
 def _supported_features(hass: HomeAssistant, light: str) -> set[str]:
     state = hass.states.get(light)
     assert state is not None
@@ -944,6 +993,9 @@ class AdaptiveSwitch(SwitchEntity, RestoreEntity):
         # Whether the `transition_until_sleep` scene has already been activated
         # for the current regime (so we only (re)fire it on entry / light-on).
         self._sleep_scene_active: bool = False
+        # Pending checks whether the lights report the scene's state (see
+        # `_schedule_scene_verify`).
+        self._scene_verify_batches: set[_SceneVerifyBatch] = set()
 
         # Set and unset tracker in async_turn_on and async_turn_off
         self.remove_listeners: list[CALLBACK_TYPE] = []
@@ -992,6 +1044,12 @@ class AdaptiveSwitch(SwitchEntity, RestoreEntity):
         # `validate` turns the "None" sentinel into an actual `None`.
         self._sleep_mode_scene: str | None = data[CONF_SLEEP_MODE_SCENE]
         self._sleep_mode_scene_transition = data[CONF_SLEEP_MODE_SCENE_TRANSITION]
+        self._sleep_mode_scene_verify_retries: int = data[
+            CONF_SLEEP_MODE_SCENE_VERIFY_RETRIES
+        ]
+        self._sleep_mode_scene_verify_delay: float = data[
+            CONF_SLEEP_MODE_SCENE_VERIFY_DELAY
+        ]
         self._only_once = data[CONF_ONLY_ONCE]
         self._prefer_rgb_color = data[CONF_PREFER_RGB_COLOR]
         self._separate_turn_on_commands = data[CONF_SEPARATE_TURN_ON_COMMANDS]
@@ -1167,6 +1225,12 @@ class AdaptiveSwitch(SwitchEntity, RestoreEntity):
         )
 
         self.remove_listeners.append(remove_sleep)
+        self.remove_listeners.append(
+            self.hass.bus.async_listen(
+                EVENT_CALL_SERVICE,
+                self._scene_verify_service_listener,
+            ),
+        )
         self._expand_light_groups()
 
     def _stagger_offset(self, adaptation_interval: timedelta) -> timedelta:
@@ -1244,6 +1308,7 @@ class AdaptiveSwitch(SwitchEntity, RestoreEntity):
     def _remove_listeners(self) -> None:
         self._remove_interval_listener()
         self._cancel_sleep_mode_scene_task()
+        self._cancel_scene_verify()
 
         while self.remove_listeners:
             remove_listener = self.remove_listeners.pop()
@@ -1612,6 +1677,7 @@ class AdaptiveSwitch(SwitchEntity, RestoreEntity):
             self._sleep_mode_scene,
         )
         self._sleep_scene_active = False
+        self._cancel_scene_verify()
         self.manager.reset(*self.lights)
         return True
 
@@ -1656,9 +1722,10 @@ class AdaptiveSwitch(SwitchEntity, RestoreEntity):
         regular handover (sleep mode turning on, or entering the regime) uses
         `sleep_mode_scene_transition`. When a light turns on, only that light
         (`lights`) gets its settings from the scene, so each light gets a single
-        command. The scene/script never turns on lights that are off (see
-        `_activate_sleep_mode_scene`); if all lights are off, nothing is applied
-        until one turns on.
+        command. A takeover only re-sends the scene to the lights that don't
+        report their state in it. The scene/script never turns on lights that
+        are off (see `_activate_sleep_mode_scene`); if all lights are off,
+        nothing is applied until one turns on.
         """
         if self._sleep_mode_scene is None:
             self._sleep_scene_active = False
@@ -1692,6 +1759,7 @@ class AdaptiveSwitch(SwitchEntity, RestoreEntity):
                     context,
                     transition=0,
                     lights=only_lights,
+                    only_mismatching=only_lights is None,
                 )
             return True
         if not self._in_transition_until_sleep_scene_regime():
@@ -1715,6 +1783,8 @@ class AdaptiveSwitch(SwitchEntity, RestoreEntity):
                 transition=0 if instant else None,
                 # Entering the regime applies the whole scene.
                 lights=only_lights if instant and not entering else None,
+                # A takeover only re-sends to the lights that don't match.
+                only_mismatching=triggered_by_service and not entering,
             )
         return True
 
@@ -1939,8 +2009,9 @@ class AdaptiveSwitch(SwitchEntity, RestoreEntity):
             reset_manual_control=self._reset_manual_control_on_sleep_mode_change,
         )
         context = self.create_context("sleep", parent=event.context)
-        # Cancel any pending scene activation from a previous sleep-mode toggle.
+        # Cancel any pending scene activation (and check) from a previous toggle.
         self._cancel_sleep_mode_scene_task()
+        self._cancel_scene_verify()
         # When sleep mode turns on and a scene/script is configured, activate it
         # instead of adapting the lights. Activation is scheduled after
         # `sleep_transition` seconds (used here as a delay). Meanwhile,
@@ -1999,6 +2070,7 @@ class AdaptiveSwitch(SwitchEntity, RestoreEntity):
         context: Context,
         transition: float | None = None,
         lights: list[str] | None = None,
+        only_mismatching: bool = False,
     ) -> None:
         """Activate the configured sleep-mode scene or run the script.
 
@@ -2009,14 +2081,21 @@ class AdaptiveSwitch(SwitchEntity, RestoreEntity):
 
         The scene/script never turns on lights that are off: only the lights of
         this switch (or `lights`, when given) that are currently on are set to
-        their state in the scene. When all lights of this switch are on (and no
-        `lights` are given), the whole scene is activated. When none are on,
-        nothing happens; a light that turns on later gets its scene state via
-        the light-on path. Scripts, scenes whose stored states are not
-        available, and scenes that contain none of this switch's lights (e.g.
-        only the members of a light group that can't be expanded) can't be
+        their state in the scene. A light of this switch that is not in the
+        scene itself but is a light group whose members are (e.g. a Zigbee2MQTT
+        group, which Adaptive Lighting can't expand) is set via its members'
+        states. When all lights of this switch are on (and no `lights` are
+        given), the whole scene is activated. When none are on, nothing
+        happens; a light that turns on later gets its scene state via the
+        light-on path. With `only_mismatching` (a takeover), only the lights
+        whose reported state differs from the scene are re-sent their state.
+        Scripts, scenes whose stored states are not available, and scenes that
+        contain none of this switch's lights (or their members) can't be
         restricted to some lights, so they run as a whole as long as at least
         one light is on.
+
+        Afterwards the applied states are verified (see
+        `_schedule_scene_verify`).
         """
         assert self._sleep_mode_scene is not None
         entity_id = self._sleep_mode_scene
@@ -2037,16 +2116,18 @@ class AdaptiveSwitch(SwitchEntity, RestoreEntity):
             return
         scene_states = self._sleep_scene_states()
         # The scene can only be restricted to some lights when it targets this
-        # switch's lights directly (not, e.g., the members of a light group that
-        # Adaptive Lighting can't expand).
-        if (
-            scene_states is not None
-            and any(light in scene_states for light in all_lights)
-            and not (lights is None and len(on_lights) == len(all_lights))
+        # switch's lights (or the members of its light groups).
+        targets = self._scene_targets(scene_states, all_lights) if scene_states else {}
+        owners = {
+            state.entity_id: light
+            for light in on_lights
+            for state in targets.get(light, [])
+        }
+        states = [state for light in on_lights for state in targets.get(light, [])]
+        if targets and (
+            only_mismatching
+            or not (lights is None and len(on_lights) == len(all_lights))
         ):
-            states = [
-                scene_states[light] for light in on_lights if light in scene_states
-            ]
             if not states:
                 _LOGGER.debug(
                     "%s: Not applying scene '%s': none of the lights that are on"
@@ -2056,21 +2137,18 @@ class AdaptiveSwitch(SwitchEntity, RestoreEntity):
                     on_lights,
                 )
                 return
-            _LOGGER.debug(
-                "%s: Applying scene '%s' to %s only (transition=%s)",
-                self._name,
-                entity_id,
-                [state.entity_id for state in states],
-                transition,
-            )
-            await async_reproduce_state(
-                self.hass,
-                states,
-                context=self.create_context("scene", parent=context),
-                reproduce_options=(
-                    {ATTR_TRANSITION: transition} if transition is not None else None
-                ),
-            )
+            if only_mismatching:
+                states = [state for state in states if self._scene_state_differs(state)]
+                if not states:
+                    _LOGGER.debug(
+                        "%s: Not re-applying scene '%s': %s already match it",
+                        self._name,
+                        entity_id,
+                        on_lights,
+                    )
+                    return
+            await self._reproduce_scene_states(states, context, transition)
+            self._schedule_scene_verify(states, owners, context, transition)
             return
         service_data: dict[str, Any] = {ATTR_ENTITY_ID: entity_id}
         # `scene.turn_on` supports a `transition`; `script.turn_on` does not, so
@@ -2093,6 +2171,272 @@ class AdaptiveSwitch(SwitchEntity, RestoreEntity):
             context=self.create_context("scene", parent=context),
             blocking=False,
         )
+        if states:
+            self._schedule_scene_verify(states, owners, context, transition)
+
+    def _scene_targets(
+        self,
+        scene_states: dict[str, State],
+        lights: list[str],
+    ) -> dict[str, list[State]]:
+        """Map each of `lights` to the scene states that set it.
+
+        That is its own state in the scene or, for a light group that is not in
+        the scene itself, the states of its members that are.
+        """
+        targets: dict[str, list[State]] = {}
+        for light in lights:
+            if light in scene_states:
+                targets[light] = [scene_states[light]]
+                continue
+            states = [
+                scene_states[member]
+                for member in _light_group_members(self.hass, light)
+                if member in scene_states
+            ]
+            if states:
+                targets[light] = states
+        return targets
+
+    def _scene_state_differs(self, target: State) -> bool:
+        """Whether a light that is on doesn't report its state in the scene.
+
+        Lights that are off (or unavailable) never count as differing, so they
+        are never turned on.
+        """
+        current = self.hass.states.get(target.entity_id)
+        if current is None or current.state != STATE_ON:
+            return False
+        return not scene_state_matches(
+            current.state,
+            current.attributes,
+            target.state,
+            target.attributes,
+        )
+
+    async def _reproduce_scene_states(
+        self,
+        states: list[State],
+        context: Context,
+        transition: float | None,
+    ) -> None:
+        """Set lights to their states in the scene (with an AL `"scene"` context)."""
+        _LOGGER.debug(
+            "%s: Applying scene '%s' to %s only (transition=%s)",
+            self._name,
+            self._sleep_mode_scene,
+            [state.entity_id for state in states],
+            transition,
+        )
+        await async_reproduce_state(
+            self.hass,
+            states,
+            context=self.create_context("scene", parent=context),
+            reproduce_options=(
+                {ATTR_TRANSITION: transition} if transition is not None else None
+            ),
+        )
+
+    def _sleep_scene_owns_lights(self) -> bool:
+        """Whether the `sleep_mode_scene` currently owns this switch's lights."""
+        if self._sleep_mode_scene is None or not self.is_on:
+            return False
+        if self.sleep_mode_switch.is_on:
+            return True
+        return (
+            self._sleep_scene_active and self._in_transition_until_sleep_scene_regime()
+        )
+
+    async def reapply_sleep_scene_on_bare_turn_on(
+        self,
+        light: str,
+        context: Context,
+    ) -> None:
+        """Re-send the scene to `light` (already on) if it doesn't match.
+
+        Called for a bare `light.turn_on` (no brightness/color) of a light that
+        is already on while the `sleep_mode_scene` owns the lights. Lights that
+        already report their scene state are left alone.
+        """
+        if (
+            not self._sleep_scene_owns_lights()
+            or self.manager.manual_control.get(light)
+            or ((task := self._sleep_mode_scene_task) is not None and not task.done())
+        ):
+            return
+        scene_states = self._sleep_scene_states()
+        if not scene_states:
+            return
+        # A light that is still in a scene transition is checked afterwards.
+        pending = self._scene_verify_entities()
+        states = [
+            state
+            for state in self._scene_targets(scene_states, [light]).get(light, [])
+            if state.entity_id not in pending and self._scene_state_differs(state)
+        ]
+        if not states:
+            return
+        _LOGGER.debug(
+            "%s: '%s' was turned on while already on and doesn't match"
+            " 'sleep_mode_scene' ('%s'), re-applying it to %s",
+            self._name,
+            light,
+            self._sleep_mode_scene,
+            [state.entity_id for state in states],
+        )
+        await self._reproduce_scene_states(states, context, 0)
+        self._schedule_scene_verify(
+            states,
+            {state.entity_id: light for state in states},
+            context,
+            0,
+        )
+
+    def _scene_verify_entities(self) -> set[str]:
+        return {
+            entity_id
+            for batch in self._scene_verify_batches
+            for entity_id in batch.targets
+        }
+
+    def _schedule_scene_verify(
+        self,
+        states: list[State],
+        owners: dict[str, str],
+        context: Context,
+        transition: float | None,
+    ) -> None:
+        """Check after the transition whether the lights report the scene's state.
+
+        Lights that don't are re-sent their state (transition 0), at most
+        `sleep_mode_scene_verify_retries` times. A newer apply of the same
+        lights replaces this check.
+        """
+        if self._sleep_mode_scene_verify_retries <= 0 or self._removed:
+            return
+        targets = {
+            state.entity_id: (state, owners[state.entity_id])
+            for state in states
+            if state.entity_id in owners
+        }
+        if not targets:
+            return
+        self._cancel_scene_verify(list(targets))
+        batch = _SceneVerifyBatch(targets, context)
+        delay = (transition or 0) + self._sleep_mode_scene_verify_delay
+        batch.task = self.hass.async_create_background_task(
+            self._run_scene_verify(batch, delay),
+            f"adaptive_lighting_{self._name}_scene_verify",
+        )
+        self._scene_verify_batches.add(batch)
+
+    def _cancel_scene_verify(self, entity_ids: Iterable[str] | None = None) -> None:
+        """Cancel pending scene checks (all, or for these lights or their members)."""
+        for batch in list(self._scene_verify_batches):
+            if entity_ids is None:
+                batch.targets.clear()
+            else:
+                for entity_id in entity_ids:
+                    for target, (_, owner) in list(batch.targets.items()):
+                        if entity_id in (target, owner):
+                            batch.targets.pop(target)
+            if not batch.targets:
+                self._scene_verify_batches.discard(batch)
+                if batch.task is not None and batch.task is not asyncio.current_task():
+                    batch.task.cancel()
+
+    async def _run_scene_verify(self, batch: _SceneVerifyBatch, delay: float) -> None:
+        retries = self._sleep_mode_scene_verify_retries
+        try:
+            for attempt in range(retries + 1):
+                await asyncio.sleep(delay)
+                if self._removed or not self._sleep_scene_owns_lights():
+                    return
+                # Lights that were turned off or taken over are not checked.
+                for target, (_, owner) in list(batch.targets.items()):
+                    if (
+                        not is_on(self.hass, owner)
+                        or owner not in self.lights
+                        or self.manager.manual_control.get(owner)
+                    ):
+                        batch.targets.pop(target)
+                mismatching = [
+                    state
+                    for state, _ in batch.targets.values()
+                    if self._scene_state_differs(state)
+                ]
+                if not mismatching:
+                    _LOGGER.debug(
+                        "%s: Lights %s match 'sleep_mode_scene' ('%s')",
+                        self._name,
+                        list(batch.targets),
+                        self._sleep_mode_scene,
+                    )
+                    return
+                if attempt == retries:
+                    _LOGGER.warning(
+                        "%s: %s still don't match 'sleep_mode_scene' ('%s') after"
+                        " %s re-send(s): %s",
+                        self._name,
+                        [state.entity_id for state in mismatching],
+                        self._sleep_mode_scene,
+                        retries,
+                        {
+                            state.entity_id: _scene_relevant_attributes(
+                                self.hass.states.get(state.entity_id),
+                            )
+                            for state in mismatching
+                        },
+                    )
+                    return
+                _LOGGER.info(
+                    "%s: %s don't match 'sleep_mode_scene' ('%s'), re-sending"
+                    " (attempt %s of %s): %s",
+                    self._name,
+                    [state.entity_id for state in mismatching],
+                    self._sleep_mode_scene,
+                    attempt + 1,
+                    retries,
+                    {
+                        state.entity_id: _scene_relevant_attributes(
+                            self.hass.states.get(state.entity_id),
+                        )
+                        for state in mismatching
+                    },
+                )
+                await self._reproduce_scene_states(mismatching, batch.context, 0)
+                delay = self._sleep_mode_scene_verify_delay
+        except asyncio.CancelledError:
+            pass
+        finally:
+            self._scene_verify_batches.discard(batch)
+
+    async def _scene_verify_service_listener(self, event: Event) -> None:
+        """Cancel pending scene checks for lights someone else changes."""
+        if not self._scene_verify_batches:
+            return
+        if event.data.get(ATTR_DOMAIN) != LIGHT_DOMAIN or is_our_context(event.context):
+            return
+        service = event.data[ATTR_SERVICE]
+        service_data = event.data[ATTR_SERVICE_DATA]
+        # A bare `light.turn_on` doesn't change the light's settings.
+        if service == SERVICE_TURN_ON and not get_light_control_attributes(
+            service_data,
+        ):
+            return
+        if service not in (SERVICE_TURN_ON, SERVICE_TURN_OFF, SERVICE_TOGGLE):
+            return
+        entity_ids = self.manager._get_entity_list(service_data)
+        if entity_ids:
+            _LOGGER.debug(
+                "%s: Cancelling the 'sleep_mode_scene' check for %s because of"
+                " 'light.%s' (context.id='%s')",
+                self._name,
+                entity_ids,
+                service,
+                event.context.id,
+            )
+            self._cancel_scene_verify(entity_ids)
 
     def fire_manual_control_event(
         self,
@@ -3054,6 +3398,28 @@ class AdaptiveLightingManager:
                             eid,
                             force=False,
                         )
+                # A bare `light.turn_on` of a light that is already on re-sends a
+                # sleep scene that owns it, if the light doesn't match it (e.g.
+                # because a Zigbee message got lost).
+                if (
+                    event.data[ATTR_SERVICE] == SERVICE_TURN_ON
+                    and not is_our_context(event.context)
+                    and not self.is_proactively_adapting(event.context.id)
+                    and not get_light_control_attributes(
+                        event.data[ATTR_SERVICE_DATA],
+                    )
+                ):
+                    for switch in switches:
+                        if switch.is_on:
+                            self.hass.async_create_task(
+                                switch.reapply_sleep_scene_on_bare_turn_on(
+                                    eid,
+                                    switch.create_context(
+                                        "bare_turn_on",
+                                        parent=event.context,
+                                    ),
+                                ),
+                            )
 
             timer = self.auto_reset_manual_control_timers.get(eid)
             if (

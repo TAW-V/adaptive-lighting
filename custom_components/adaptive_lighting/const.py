@@ -176,7 +176,35 @@ DOCS[CONF_SLEEP_MODE_SCENE_TRANSITION] = (
     "re-applied because a light turns on, or by `set_manual_control` with "
     "`manual_control: false` or `apply`, it is applied instantly "
     "(transition 0); when a light turns on, only that light is set to its "
-    "state in the scene (for scenes defined in Home Assistant). ⏲️🎬"
+    "state in the scene (for scenes defined in Home Assistant). Lights that "
+    "are already on (`set_manual_control`, `apply`, or a bare `light.turn_on`) "
+    "are only re-sent their state when it doesn't match the scene. ⏲️🎬"
+)
+
+CONF_SLEEP_MODE_SCENE_VERIFY_RETRIES, DEFAULT_SLEEP_MODE_SCENE_VERIFY_RETRIES = (
+    "sleep_mode_scene_verify_retries",
+    2,
+)
+DOCS[CONF_SLEEP_MODE_SCENE_VERIFY_RETRIES] = (
+    "Only for a `sleep_mode_scene` defined in Home Assistant. After Adaptive "
+    "Lighting applies the scene, it checks whether the lights report their "
+    "state in the scene (brightness ±3, color within a small tolerance) and "
+    "re-sends it (transition 0) to the lights that don't, e.g. because a "
+    "Zigbee message got lost. This is the maximum number of re-sends per "
+    "check; a warning is logged when a light still doesn't match. The check "
+    "is cancelled when the light is turned off or changed by someone else, "
+    "when it becomes manually controlled, or when the sleep regime ends. "
+    "Lights that are off are never turned on. 0 disables the check. 🔁🎬"
+)
+
+CONF_SLEEP_MODE_SCENE_VERIFY_DELAY, DEFAULT_SLEEP_MODE_SCENE_VERIFY_DELAY = (
+    "sleep_mode_scene_verify_delay",
+    3,
+)
+DOCS[CONF_SLEEP_MODE_SCENE_VERIFY_DELAY] = (
+    "Seconds to wait after the scene's transition has ended (and after each "
+    "re-send) before checking whether the lights match the "
+    "`sleep_mode_scene`, see `sleep_mode_scene_verify_retries`. ⏲️🔁"
 )
 
 CONF_SUNRISE_OFFSET, DEFAULT_SUNRISE_OFFSET = "sunrise_offset", 0
@@ -464,6 +492,16 @@ VALIDATION_TUPLES: list[tuple[str, Any, Any]] = [
         CONF_SLEEP_MODE_SCENE_TRANSITION,
         DEFAULT_SLEEP_MODE_SCENE_TRANSITION,
         VALID_TRANSITION,
+    ),
+    (
+        CONF_SLEEP_MODE_SCENE_VERIFY_RETRIES,
+        DEFAULT_SLEEP_MODE_SCENE_VERIFY_RETRIES,
+        int_between(0, 10),
+    ),
+    (
+        CONF_SLEEP_MODE_SCENE_VERIFY_DELAY,
+        DEFAULT_SLEEP_MODE_SCENE_VERIFY_DELAY,
+        cv.positive_float,
     ),
     (CONF_ADAPT_UNTIL_SLEEP, DEFAULT_ADAPT_UNTIL_SLEEP, bool),
     (
