@@ -1479,6 +1479,145 @@ async def test_sleep_mode_scene_off_light_turned_on_gets_scene_instantly(hass):
     assert switch.sleep_mode_switch.is_on
 
 
+async def _setup_other_intercepting_switch(hass):
+    """A second profile with only light 3 that adapts its turn-on proactively."""
+    _, other = await setup_switch(
+        hass,
+        {
+            CONF_NAME: "other",
+            CONF_LIGHTS: [ENTITY_LIGHT_3],
+            CONF_INTERCEPT: True,
+            CONF_SUNRISE_TIME: datetime.time(SUNRISE.hour),
+            CONF_SUNSET_TIME: datetime.time(SUNSET.hour),
+            CONF_INITIAL_TRANSITION: 0,
+            CONF_TRANSITION: 0,
+        },
+    )
+    return other
+
+
+def _track_off_to_on_responses(monkeypatch, *switches):
+    """Record the lights for which `_respond_to_off_to_on_event` runs."""
+    responded: list[str] = []
+    for switch in switches:
+        original = switch._respond_to_off_to_on_event
+
+        async def _wrapped(entity_id, event, _original=original):
+            responded.append(entity_id)
+            await _original(entity_id, event)
+
+        monkeypatch.setattr(switch, "_respond_to_off_to_on_event", _wrapped)
+    return responded
+
+
+async def test_sleep_mode_scene_light_on_in_shared_context(hass, monkeypatch):
+    """A scene light turned on in the same context as a proactively adapted light.
+
+    One automation run shares one context: light 3 (another profile) is turned
+    on first and adapted proactively under that context; light 2 is owned by the
+    sleep scene, so the interceptor leaves its bare turn-on alone. Light 2's
+    'off' → 'on' must still be handled (and get its scene state), instead of
+    being skipped because the context is "already proactively adapting".
+    """
+    switch = await _enter_sleep_scene(
+        hass,
+        {CONF_INTERCEPT: True, CONF_SLEEP_MODE_SCENE_VERIFY_RETRIES: 0},
+    )
+    other = await _setup_other_intercepting_switch(hass)
+    await _turn_lights(hass, SERVICE_TURN_OFF, [ENTITY_LIGHT_2, ENTITY_LIGHT_3])
+    _report_brightness(hass, ENTITY_LIGHT_2, 138)  # the bulb's own memory
+    calls = _record_scene_light_calls(hass)
+    responded = _track_off_to_on_responses(monkeypatch, switch, other)
+
+    context = Context(id="automation_run")
+    for light in (ENTITY_LIGHT_3, ENTITY_LIGHT_2):
+        await hass.services.async_call(
+            LIGHT_DOMAIN,
+            SERVICE_TURN_ON,
+            {ATTR_ENTITY_ID: light},
+            blocking=True,
+            context=context,
+        )
+    await asyncio.gather(*switch.manager.adaptation_tasks)
+    await hass.async_block_till_done()
+
+    manager = switch.manager
+    assert manager.is_proactively_adapting(context.id, ENTITY_LIGHT_3)
+    assert not manager.is_proactively_adapting(context.id, ENTITY_LIGHT_2)
+    # Light 3 was adapted by the interceptor, light 2 via its 'off' → 'on' event.
+    assert responded == [ENTITY_LIGHT_2]
+    assert hass.states.get(ENTITY_LIGHT_2).attributes[ATTR_BRIGHTNESS] == 20
+    light_2_calls = _calls_for(calls, ENTITY_LIGHT_2)
+    assert len(light_2_calls) == 1
+    assert light_2_calls[0][ATTR_TRANSITION] == 0
+    assert not _calls_for(calls, ENTITY_LIGHT_1)
+    assert not _calls_for(calls, ENTITY_LIGHT_3)
+
+
+async def test_proactive_adaptation_skips_off_to_on_per_light(hass, monkeypatch):
+    """Proactively adapted lights don't get a second, 'off' → 'on' adaptation.
+
+    For a single light and for several lights turned on in one context.
+    """
+    switch, _ = await setup_lights_and_switch(hass, {CONF_INTERCEPT: True})
+    other = await _setup_other_intercepting_switch(hass)
+    lights = [ENTITY_LIGHT_1, ENTITY_LIGHT_2, ENTITY_LIGHT_3]
+    await _turn_lights(hass, SERVICE_TURN_OFF, lights)
+    responded = _track_off_to_on_responses(monkeypatch, switch, other)
+    manager = switch.manager
+
+    # A single light
+    await hass.services.async_call(
+        LIGHT_DOMAIN,
+        SERVICE_TURN_ON,
+        {ATTR_ENTITY_ID: ENTITY_LIGHT_1},
+        blocking=True,
+        context=Context(id="single"),
+    )
+    await asyncio.gather(*manager.adaptation_tasks)
+    await hass.async_block_till_done()
+    assert manager.is_proactively_adapting("single", ENTITY_LIGHT_1)
+    assert not manager.is_proactively_adapting("single", ENTITY_LIGHT_2)
+    assert responded == []
+
+    # Two lights of different profiles, turned on separately in one context
+    context = Context(id="shared")
+    for light in (ENTITY_LIGHT_2, ENTITY_LIGHT_3):
+        await hass.services.async_call(
+            LIGHT_DOMAIN,
+            SERVICE_TURN_ON,
+            {ATTR_ENTITY_ID: light},
+            blocking=True,
+            context=context,
+        )
+    await asyncio.gather(*manager.adaptation_tasks)
+    await hass.async_block_till_done()
+    assert manager.is_proactively_adapting("shared", ENTITY_LIGHT_2)
+    assert manager.is_proactively_adapting("shared", ENTITY_LIGHT_3)
+    assert not manager.is_proactively_adapting("shared", ENTITY_LIGHT_1)
+    assert responded == []
+
+
+async def test_proactive_adapting_is_scoped_per_light(hass):
+    """Contexts are tracked per light and cleared per light."""
+    switch, _ = await setup_lights_and_switch(hass)
+    manager = switch.manager
+    manager.set_proactively_adapting("ctx", ENTITY_LIGHT_1)
+    assert manager.is_proactively_adapting("ctx", ENTITY_LIGHT_1)
+    assert not manager.is_proactively_adapting("ctx", ENTITY_LIGHT_2)
+
+    # Several lights may share one context, e.g. one intercepted multi-light call
+    manager.set_proactively_adapting("ctx", ENTITY_LIGHT_2)
+    assert manager.is_proactively_adapting("ctx", ENTITY_LIGHT_1)
+    assert manager.is_proactively_adapting("ctx", ENTITY_LIGHT_2)
+
+    manager.clear_proactively_adapting(ENTITY_LIGHT_1)
+    assert not manager.is_proactively_adapting("ctx", ENTITY_LIGHT_1)
+    assert manager.is_proactively_adapting("ctx", ENTITY_LIGHT_2)
+    manager.clear_proactively_adapting(ENTITY_LIGHT_2)
+    assert "ctx" not in manager._proactively_adapting_contexts
+
+
 async def test_sleep_mode_scene_bare_turn_on_of_matching_light_sends_nothing(hass):
     """A bare `light.turn_on` of lights that already match the scene is a no-op."""
     await _enter_sleep_scene(hass, {CONF_SLEEP_MODE_SCENE_VERIFY_RETRIES: 0})
@@ -4435,7 +4574,7 @@ async def test_proactive_adaptation_toggle(hass):
         context=Context(id="test1"),
     )
 
-    assert switch.manager.is_proactively_adapting("test1")
+    assert switch.manager.is_proactively_adapting("test1", ENTITY_LIGHT_3)
 
     # Toggle OFF
     await hass.services.async_call(
@@ -4446,7 +4585,7 @@ async def test_proactive_adaptation_toggle(hass):
         context=Context(id="test2"),
     )
 
-    assert not switch.manager.is_proactively_adapting("test2")
+    assert not switch.manager.is_proactively_adapting("test2", ENTITY_LIGHT_3)
 
 
 async def test_proactive_adaptation_transition_override(hass):
@@ -4555,8 +4694,15 @@ async def test_proactive_multiple_lights_all_at_once(hass):
     assert events[2].data["service_data"][ATTR_ENTITY_ID] == [ENTITY_LIGHT_3]
     assert ":skpp:" in events[2].context.id
 
-    assert switch1.manager.is_proactively_adapting("test1")
-    assert switch2.manager.is_proactively_adapting("test1")
+    assert switch1.manager.is_proactively_adapting("test1", ENTITY_LIGHT_1)
+    assert switch2.manager.is_proactively_adapting("test1", ENTITY_LIGHT_1)
+    # Light 2 is adapted under its own context, light 3 is not adapted at all
+    assert not switch1.manager.is_proactively_adapting("test1", ENTITY_LIGHT_2)
+    assert switch1.manager.is_proactively_adapting(
+        events[1].context.id,
+        ENTITY_LIGHT_2,
+    )
+    assert not switch1.manager.is_proactively_adapting("test1", ENTITY_LIGHT_3)
 
     await hass.async_block_till_done()
 
@@ -4640,8 +4786,9 @@ async def test_proactive_multiple_lights_one_switch_and_one_skipped(hass):
     assert events[1].data["service_data"][ATTR_ENTITY_ID] == [ENTITY_LIGHT_3]
     assert ":skpp:" in events[1].context.id
 
-    assert switch1.manager.is_proactively_adapting("test1")
-    assert switch2.manager.is_proactively_adapting("test1")
+    assert switch1.manager.is_proactively_adapting("test1", ENTITY_LIGHT_1)
+    assert switch2.manager.is_proactively_adapting("test1", ENTITY_LIGHT_1)
+    assert not switch1.manager.is_proactively_adapting("test1", ENTITY_LIGHT_3)
 
     await hass.async_block_till_done()
 
@@ -4959,6 +5106,13 @@ async def test_light_group(
             "light.light_5",
         ]
         assert events[1].context.id == "testing"
+        # The group's members are tracked, each under the shared context
+        for light in ("light.light_4", "light.light_5"):
+            assert switch.manager.is_proactively_adapting("testing", light)
+        assert not switch.manager.is_proactively_adapting(
+            "testing",
+            "light.light_group",
+        )
     else:
         assert events[0].data["service_data"][ATTR_ENTITY_ID] == "light.light_group"
         assert events[0].context.id == "testing"
@@ -4975,8 +5129,12 @@ async def test_light_group(
         assert ":lght:" in events[2].context.id
         assert ":lght:" in events[3].context.id
         assert len(events) == 4
-        assert not switch.manager.is_proactively_adapting(events[0].context.id)
-        assert not switch.manager.is_proactively_adapting(events[1].context.id)
+        for event in events[:2]:
+            for light in ("light.light_4", "light.light_5"):
+                assert not switch.manager.is_proactively_adapting(
+                    event.context.id,
+                    light,
+                )
 
     # Turn off all lights, and then turn on all lights
     await hass.services.async_call(

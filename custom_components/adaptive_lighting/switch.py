@@ -1571,7 +1571,10 @@ class AdaptiveSwitch(SwitchEntity, RestoreEntity):
                 not data.force
                 and not is_on(self.hass, data.entity_id)
                 # if proactively adapting, we are sure that it came from a `light.turn_on`
-                and not self.manager.is_proactively_adapting(data.context.id)
+                and not self.manager.is_proactively_adapting(
+                    data.context.id,
+                    data.entity_id,
+                )
             ):
                 # Do a last-minute check if the entity is still on.
                 _LOGGER.debug(
@@ -1913,7 +1916,7 @@ class AdaptiveSwitch(SwitchEntity, RestoreEntity):
         entity_id: str,
         event: Event[EventStateChangedData],
     ) -> None:
-        assert not self.manager.is_proactively_adapting(event.context.id)
+        assert not self.manager.is_proactively_adapting(event.context.id, entity_id)
         from_turn_on = self.manager._off_to_on_state_event_is_from_turn_on(
             entity_id,
             event,
@@ -2606,7 +2609,7 @@ class AdaptiveLightingManager:
             ),
         ]
 
-        self._proactively_adapting_contexts: dict[str, str] = {}
+        self._proactively_adapting_contexts: dict[str, set[str]] = {}
         self._context_cnt: int = 0
 
         try:
@@ -2649,18 +2652,26 @@ class AdaptiveLightingManager:
         """Declare the adaptation with context_id as proactively adapting,
         and associate it to an entity_id.
         """  # noqa: D205
-        self._proactively_adapting_contexts[context_id] = entity_id
+        self._proactively_adapting_contexts.setdefault(context_id, set()).add(
+            entity_id,
+        )
 
-    def is_proactively_adapting(self, context_id: str) -> bool:
-        """Determine whether an adaptation with the given context_id is proactive."""
-        is_proactively_adapting_context = (
-            context_id in self._proactively_adapting_contexts
+    def is_proactively_adapting(self, context_id: str, entity_id: str) -> bool:
+        """Determine whether we are proactively adapting entity_id under context_id.
+
+        Scoped per entity: one automation run shares a context across calls, and
+        a proactive turn-on of one light must not hide the turn-on (or manual
+        changes) of another light in the same context.
+        """
+        is_proactively_adapting_context = entity_id in (
+            self._proactively_adapting_contexts.get(context_id, ())
         )
 
         _LOGGER.debug(
-            "is_proactively_adapting_context='%s', context_id='%s'",
+            "is_proactively_adapting_context='%s', context_id='%s', entity_id='%s'",
             is_proactively_adapting_context,
             context_id,
+            entity_id,
         )
 
         return is_proactively_adapting_context
@@ -2672,10 +2683,13 @@ class AdaptiveLightingManager:
         """
         # First get the keys to avoid modifying the dict while iterating it
         keys = [
-            k for k, v in self._proactively_adapting_contexts.items() if v == entity_id
+            k for k, v in self._proactively_adapting_contexts.items() if entity_id in v
         ]
         for key in keys:
-            self._proactively_adapting_contexts.pop(key)
+            entity_ids = self._proactively_adapting_contexts[key]
+            entity_ids.discard(entity_id)
+            if not entity_ids:
+                self._proactively_adapting_contexts.pop(key)
 
     def create_context(
         self,
@@ -3404,7 +3418,7 @@ class AdaptiveLightingManager:
                 if (
                     event.data[ATTR_SERVICE] == SERVICE_TURN_ON
                     and not is_our_context(event.context)
-                    and not self.is_proactively_adapting(event.context.id)
+                    and not self.is_proactively_adapting(event.context.id, eid)
                     and not get_light_control_attributes(
                         event.data[ATTR_SERVICE_DATA],
                     )
@@ -3426,7 +3440,7 @@ class AdaptiveLightingManager:
                 timer is not None
                 and timer.is_running()
                 and not is_our_context(event.context)
-                and not self.is_proactively_adapting(event.context.id)
+                and not self.is_proactively_adapting(event.context.id, eid)
                 and event.time_fired > timer.start_time  # type: ignore[operator]
             ):
                 # Only external turn-ons extend manual control, not our adaptations.
@@ -3567,7 +3581,7 @@ class AdaptiveLightingManager:
                 event.context.id,
             )
 
-            if self.is_proactively_adapting(event.context.id):
+            if self.is_proactively_adapting(event.context.id, entity_id):
                 _LOGGER.debug(
                     "Skipping responding to 'off' → 'on' event for '%s' with context.id='%s' because"
                     " we are already proactively adapting",
@@ -3614,7 +3628,7 @@ class AdaptiveLightingManager:
 
         if (
             turn_on_event is None
-            or self.is_proactively_adapting(turn_on_event.context.id)
+            or self.is_proactively_adapting(turn_on_event.context.id, light)
             or is_our_context(turn_on_event.context)
             or force
         ):
